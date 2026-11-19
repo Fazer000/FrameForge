@@ -10,9 +10,9 @@ namespace FrameForge;
 public record ProcessingProfile(string Name, string Processor, string Model, int Noise)
 {
     public static readonly ProcessingProfile[] All = [
-        new("Аниме · Real-CUGAN SE", "realcugan", "models-se", 0),
-        new("Аниме · Real-CUGAN SE / очистка", "realcugan", "models-se", 1),
-        new("Аниме · Real-ESRGAN Video v3", "realesrgan", "realesr-animevideov3", 0),
+        new("Аниме · Высокое · Real-CUGAN", "realcugan", "models-se", 0),
+        new("Аниме · Высокое + очистка · Real-CUGAN", "realcugan", "models-se", 1),
+        new("Аниме · Базовое · Real-ESRGAN Video v3", "realesrgan", "realesr-animevideov3", 0),
         new("Обычное видео · Real-ESRGAN Plus", "realesrgan", "realesrgan-plus", 0)
     ];
 }
@@ -95,7 +95,7 @@ public static class VideoProbe
 }
 
 public record ProcessingRequest(string Input, string OutputRoot, string Video2X, string FFmpeg,
-    string FFprobe, ProcessingProfile Profile, int Scale, double Start, double Duration);
+    string FFprobe, ProcessingProfile Profile, int TargetWidth, int TargetHeight, double Start, double Duration);
 
 public interface IVideoProcessor
 {
@@ -105,17 +105,17 @@ public interface IVideoProcessor
 
 public sealed class Video2XProcessor : IVideoProcessor
 {
-    public static string[] BuildArguments(ProcessingProfile profile, int scale, string input, string output)
+    public static string[] BuildArguments(ProcessingProfile profile, int scale, string input, string output, bool lossless = false)
     {
         if (scale is not (2 or 4)) throw new ArgumentException("Масштаб должен быть 2 или 4.");
         if (profile.Model == "realesrgan-plus" && scale != 4)
             throw new ArgumentException("Real-ESRGAN Plus требует масштаб 4×.");
         if (profile.Processor == "realcugan" && profile.Noise == 1 && scale != 2)
             throw new ArgumentException("Real-CUGAN SE с очисткой уровня 1 поддерживает в прототипе только 2×.");
-        return ["-i", input, "-o", output, "-p", profile.Processor,
+        string[] common = ["-i", input, "-o", output, "-p", profile.Processor,
             $"--{profile.Processor}-model", profile.Model, "-s", scale.ToString(),
-            "-n", profile.Noise.ToString(), "-d", "0", "-c", "libx264", "--pix-fmt", "yuv420p",
-            "-e", "crf=16", "-e", "preset=medium"];
+            "-n", profile.Noise.ToString(), "-d", "0", "-c", lossless ? "ffv1" : "libx264", "--pix-fmt", "yuv420p"];
+        return lossless ? common : [..common, "-e", "crf=16", "-e", "preset=medium"];
     }
 
     public async Task<string> ProcessAsync(ProcessingRequest r, Action<string> log,
@@ -125,8 +125,8 @@ public sealed class Video2XProcessor : IVideoProcessor
             if (!File.Exists(file)) throw new FileNotFoundException("Файл не найден", file);
         if (!double.IsFinite(r.Start) || !double.IsFinite(r.Duration) || r.Start < 0 || r.Duration <= 0 || r.Duration > 300)
             throw new ArgumentException("Укажите начало ≥ 0 и длительность от 0 до 300 секунд.");
-        _ = BuildArguments(r.Profile, r.Scale, "input", "output");
         var source = await VideoProbe.ReadAsync(r.FFprobe, r.Input, token);
+        var plan = ResolutionPlan.Create(source.Width, source.Height, r.TargetWidth, r.TargetHeight, r.Profile);
         if (source.Duration > 0 && r.Start + r.Duration > source.Duration + 0.1)
             throw new ArgumentException("Фрагмент выходит за длительность видео.");
         // A fresh job directory prevents collisions and any input overwrite.
@@ -135,6 +135,7 @@ public sealed class Video2XProcessor : IVideoProcessor
         Directory.CreateDirectory(directory);
         var clip = Path.Combine(directory, "reference.mkv");
         var partial = Path.Combine(directory, "enhanced.partial.mkv");
+        var intermediate = plan.NeedsResize ? Path.Combine(directory, "model-output.mkv") : partial;
         var output = Path.Combine(directory, "enhanced.mkv");
         var timer = Stopwatch.StartNew();
         var report = Path.Combine(directory, "report.json");
@@ -145,32 +146,43 @@ public sealed class Video2XProcessor : IVideoProcessor
             await ProcessRunner.RunAsync(r.FFmpeg,
                 ["-nostdin", "-n", "-v", "warning", "-i", r.Input, "-ss", r.Start.ToString(CultureInfo.InvariantCulture),
                  "-t", r.Duration.ToString(CultureInfo.InvariantCulture), "-map", "0:v:0", "-map", "0:a?",
-                 "-c:v", "ffv1", "-level", "3", "-c:a", "flac", clip], log, token);
-            log($"Обработка: {r.Profile.Name}, {r.Scale}×. GPU 0.\nКаталог: {directory}");
-            var args = BuildArguments(r.Profile, r.Scale, clip, partial);
+                 // Trimming may produce an initial audio frame shorter than FLAC's minimum
+                 // block size. PCM accepts it and preserves decoded floating-point audio.
+                 "-c:v", "ffv1", "-level", "3", "-c:a", "pcm_f32le", clip], log, token);
+            log($"Обработка: {r.Profile.Name}. {source.Width}×{source.Height} → модель {plan.ModelScale}× → {plan.Width}×{plan.Height}. GPU 0.\nКаталог: {directory}");
+            var args = BuildArguments(r.Profile, plan.ModelScale, clip, intermediate, plan.NeedsResize);
             try { await ProcessRunner.RunAsync(r.Video2X, args, line => {
                 log(line);
                 var match = Regex.Match(line, @"(\d+(?:\.\d+)?)\s*%");
                 if (match.Success && double.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var p))
-                    progress(Math.Clamp(p, 0, 100));
+                    progress(Math.Clamp(p, 0, 100) * 0.85);
             }, token); }
             catch (ExternalProcessException ex) when (ex.ExitCode == unchecked((int)0xC0000005) &&
-                ex.Message.Contains("Video processed successfully", StringComparison.Ordinal) && File.Exists(partial))
+                ex.Message.Contains("Video processed successfully", StringComparison.Ordinal) && File.Exists(intermediate))
             {
                 warning = "Video2X завершился с 0xC0000005 после сообщения об успехе. Результат требует проверки; это сбой обработчика.";
                 log("ПРЕДУПРЕЖДЕНИЕ: " + warning);
             }
+            if (plan.NeedsResize)
+            {
+                log($"Приведение к {plan.Width}×{plan.Height}, Lanczos. Промежуточный файл без потерь.");
+                await ProcessRunner.RunAsync(r.FFmpeg,
+                    ["-nostdin", "-n", "-v", "warning", "-xerror", "-i", intermediate, "-map", "0:v:0", "-map", "0:a?",
+                     "-vf", $"scale={plan.Width}:{plan.Height}:flags=lanczos,setsar=1", "-c:v", "libx264", "-crf", "16",
+                     "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy", partial], log, token);
+            }
+            progress(95);
             log("Проверка: полное декодирование видео и аудио…");
             await ProcessRunner.RunAsync(r.FFmpeg,
                 ["-nostdin", "-v", "error", "-xerror", "-i", partial, "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"], log, token);
             var result = await VideoProbe.ReadAsync(r.FFprobe, partial, token);
-            if (result.Width != source.Width * r.Scale || result.Height != source.Height * r.Scale ||
+            if (result.Width != plan.Width || result.Height != plan.Height ||
                 result.Duration <= 0 || Math.Abs(result.Duration - r.Duration) > 1)
                 throw new InvalidOperationException("Результат не прошёл проверку размера или длительности.");
             token.ThrowIfCancellationRequested();
             File.Move(partial, output, overwrite: false);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new {
-                Status = warning == null ? "Completed" : "CompletedWithWarning", Warning = warning, Request = r, Source = source, Result = result,
+                Status = warning == null ? "Completed" : "CompletedWithWarning", Warning = warning, Request = r, Plan = plan, Source = source, Result = result,
                 ElapsedSeconds = timer.Elapsed.TotalSeconds, OutputBytes = new FileInfo(output).Length,
                 CompletedAt = DateTimeOffset.Now
             }, new JsonSerializerOptions { WriteIndented = true }));

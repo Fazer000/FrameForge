@@ -65,9 +65,10 @@ public partial class MainWindow : Window
     {
         if (!TrySeconds(StartSeconds.Text, out var start) || !TrySeconds(DurationSeconds.Text, out var duration))
         { MessageBox.Show("Начало и длительность должны быть числами в секундах."); return; }
-        var scale = int.Parse(((ComboBoxItem)ScaleBox.SelectedItem).Tag.ToString()!);
+        if (!int.TryParse(TargetWidthBox.Text, out var width) || !int.TryParse(TargetHeightBox.Text, out var height))
+        { MessageBox.Show("Укажите ширину и высоту в целых пикселях."); return; }
         var request = new ProcessingRequest(InputPath.Text, OutputPath.Text, Video2XPath.Text, FFmpegPath.Text,
-            FFprobePath.Text, (ProcessingProfile)ProfileBox.SelectedItem, scale, start, duration);
+            FFprobePath.Text, (ProcessingProfile)ProfileBox.SelectedItem, width, height, start, duration);
         cancellation = new CancellationTokenSource();
         SettingsPanel.IsEnabled = false; RunButton.IsEnabled = false; CancelButton.IsEnabled = true;
         Progress.Value = 0; Progress.IsIndeterminate = true; LogBox.Clear(); StatusText.Text = "Подготовка и обработка…";
@@ -91,6 +92,13 @@ public partial class MainWindow : Window
         }
     }
     private static bool TrySeconds(string s, out double value) => double.TryParse(s.Replace(',', '.'), CultureInfo.InvariantCulture, out value);
+    private void ResolutionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (TargetWidthBox == null || TargetHeightBox == null || ResolutionBox.SelectedItem is not ComboBoxItem item) return;
+        var tag = item.Tag.ToString()!;
+        TargetWidthBox.IsEnabled = TargetHeightBox.IsEnabled = tag == "custom";
+        if (tag != "custom") { var dimensions = tag.Split(','); TargetWidthBox.Text = dimensions[0]; TargetHeightBox.Text = dimensions[1]; }
+    }
     private void Cancel(object sender, RoutedEventArgs e) { cancellation?.Cancel(); CancelButton.IsEnabled = false; }
     private void OpenResults(object sender, RoutedEventArgs e)
     {

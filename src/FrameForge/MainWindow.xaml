@@ -12,11 +12,12 @@
    <Grid>
     <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <StackPanel Margin="0,0,12,0"><TextBlock Text="Модель" Margin="0,0,0,6"/><ComboBox x:Name="ProfileBox" DisplayMemberPath="Name"/></StackPanel>
-    <StackPanel Grid.Column="1" Margin="0,0,12,0"><TextBlock Text="Масштаб" Margin="0,0,0,6"/><ComboBox x:Name="ScaleBox" SelectedIndex="0"><ComboBoxItem Content="2×" Tag="2"/><ComboBoxItem Content="4×" Tag="4"/></ComboBox></StackPanel>
+    <StackPanel Grid.Column="1" Margin="0,0,12,0"><TextBlock Text="Разрешение" Margin="0,0,0,6"/><ComboBox x:Name="ResolutionBox" SelectedIndex="0" SelectionChanged="ResolutionChanged"><ComboBoxItem Content="1080p" Tag="1920,1080"/><ComboBoxItem Content="1440p" Tag="2560,1440"/><ComboBoxItem Content="2160p / 4K" Tag="3840,2160"/><ComboBoxItem Content="Своё" Tag="custom"/></ComboBox></StackPanel>
     <StackPanel Grid.Column="2" Margin="0,0,12,0"><TextBlock Text="Начало, сек." Margin="0,0,0,6"/><TextBox x:Name="StartSeconds" Text="60"/></StackPanel>
     <StackPanel Grid.Column="3"><TextBlock Text="Длина, сек." Margin="0,0,0,6"/><TextBox x:Name="DurationSeconds" Text="10"/></StackPanel>
    </Grid>
-   <TextBlock Text="Сначала сравнивайте короткие фрагменты. Частота кадров сохраняется; кодирование H.264, CRF 16." Foreground="#97ABC8" Margin="0,9,0,16" TextWrapping="Wrap"/>
+   <StackPanel Orientation="Horizontal" Margin="0,10,0,0"><TextBlock Text="Вписать в" VerticalAlignment="Center" Margin="0,0,10,0"/><TextBox x:Name="TargetWidthBox" Text="1920" Width="85" IsEnabled="False"/><TextBlock Text=" × " VerticalAlignment="Center"/><TextBox x:Name="TargetHeightBox" Text="1080" Width="85" IsEnabled="False"/><TextBlock Text="пикселей · пропорции сохраняются" VerticalAlignment="Center" Margin="10,0,0,0"/></StackPanel>
+   <TextBlock Text="Разрешение ограничивает размер файла на выходе. Real-ESRGAN Plus внутри работает в 4×. H.264, CRF 16." Foreground="#97ABC8" Margin="0,9,0,16" TextWrapping="Wrap"/>
    <TextBlock Text="Папка результатов" Margin="0,0,0,6"/>
    <DockPanel><Button DockPanel.Dock="Right" Content="Выбрать…" Click="ChooseOutput" Margin="10,0,0,0"/><TextBox x:Name="OutputPath" IsReadOnly="True"/></DockPanel>
    <Expander Header="Инструменты обработки" Foreground="#A8BFE2" Margin="0,16,0,12">
