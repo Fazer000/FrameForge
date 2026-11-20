@@ -6,5 +6,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>FrameForge</AssemblyName>
+    <ApplicationIcon>Assets/FrameForge.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets/FrameForge.ico" />
+    <ProjectReference Include="../FrameForge.Core/FrameForge.Core.csproj" />
+  </ItemGroup>
 </Project>

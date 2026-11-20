@@ -1,3 +1,4 @@
+// Точка входа проверок с внешними инструментами.
 using System.Security.Cryptography;
 using System.Text.Json;
 using FrameForge;
@@ -5,6 +6,7 @@ using FrameForge;
 var root = Path.GetFullPath(args.Length > 0 ? args[0] : ".");
 if (args.Contains("--workflow")) { await WorkflowSmoke.Run(root); return; }
 if (args.Contains("--library-cleanup")) { await WorkflowSmoke.Run(root, allProfiles: false); return; }
+/// <summary>Находит исполняемый файл для проверки.</summary>
 string Tool(string name) => Directory.EnumerateFiles(Path.Combine(root, "tools"), name, SearchOption.AllDirectories).First();
 var audioRegression = args.Contains("--audio-regression");
 var input = audioRegression
@@ -20,14 +22,13 @@ if (args.Contains("--pro-only"))
 {
     var pro = profiles.Single(p => p.Model == "models-pro");
     var source = await VideoProbe.ReadAsync(probe, input, CancellationToken.None);
-    // Exercise both Pro weight sets and the resize path, relative to the actual test source.
     foreach (var factor in new[] { 1.5, 3.0 })
     {
         var width = (int)(source.Width * factor) / 2 * 2;
         var height = (int)(source.Height * factor) / 2 * 2;
         var result = await processor.ProcessAsync(new ProcessingRequest(input,
             Path.Combine(root, "experiments", "pro-smoke"), video2x, ffmpeg, probe, pro,
-            width, height, 60, 1), Console.WriteLine, _ => {}, CancellationToken.None);
+            width, height, 60, 1), Console.WriteLine, _ => { }, CancellationToken.None);
         var actual = await VideoProbe.ReadAsync(probe, Path.Combine(result, "enhanced.mkv"), CancellationToken.None);
         if (actual.Width != width || actual.Height != height) throw new Exception("Pro output resolution mismatch");
         Console.WriteLine($"PASS Pro {factor}× target: {width}×{height}, {result}");
@@ -58,7 +59,7 @@ foreach (var profile in selectedProfiles)
     var request = new ProcessingRequest(input, Path.Combine(root, "experiments", "smoke"), video2x, ffmpeg,
         probe, profile, audioRegression ? 2560 : 1920, audioRegression ? 1440 : 1080,
         audioRegression ? 30 : 60, audioRegression ? 30 : 1);
-    var result = await processor.ProcessAsync(request, Console.WriteLine, _ => {}, CancellationToken.None);
+    var result = await processor.ProcessAsync(request, Console.WriteLine, _ => { }, CancellationToken.None);
     if (!File.Exists(Path.Combine(result, "enhanced.mkv"))) throw new Exception("Missing output");
     using var report = JsonDocument.Parse(File.ReadAllText(Path.Combine(result, "report.json")));
     var actual = report.RootElement.GetProperty("Result");
@@ -79,7 +80,6 @@ foreach (var profile in selectedProfiles)
     }
     Console.WriteLine($"PASS {profile.Name}: {result}");
 }
-// Cancellation exercises the actual process runner, not a mocked token.
 using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
 {
     try

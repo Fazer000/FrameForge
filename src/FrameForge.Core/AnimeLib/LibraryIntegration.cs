@@ -1,27 +1,33 @@
-using System.Diagnostics;
+// Читает каталог и заменяет файлы серий.
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace FrameForge;
 
+/// <summary>Описывает файл серии AnimeLib.</summary>
 public sealed record LibraryVideo(string DirectoryPath, string FileName, string Title, string OriginalHash)
 {
     public string SourcePath => Path.Combine(DirectoryPath, FileName);
     public string MarkerPath => SourcePath + ".frameforge.json";
     public string BackupPath => SourcePath + ".frameforge-original";
+    /// <summary>Возвращает название серии.</summary>
     public override string ToString() => Title;
 }
 
+/// <summary>Хранит метаданные замены серии.</summary>
 public sealed record EnhancementMarker(int Version, string State, string SourceFileName, string OriginalHash,
     string EnhancedHash, long EnhancedLength, string Profile, DateTimeOffset CompletedAt, int Width = 0, int Height = 0);
 
+/// <summary>Читает каталог и заменяет файлы серий.</summary>
 public static class LibraryIntegration
 {
+    /// <summary>Вычисляет SHA256 файла.</summary>
     public static string Hash(string path)
     { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
 
-    public static List<LibraryVideo> ReadCatalog(string directory)
+    /// <summary>Возвращает доступные локальные серии.</summary>
+    public static async Task<List<LibraryVideo>> ReadCatalogAsync(string directory, string? probe = null)
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "index.json")));
         var result = new List<LibraryVideo>();
@@ -31,12 +37,56 @@ public static class LibraryIntegration
                 var name = episode.GetProperty("fileName").GetString()!;
                 if (Path.GetFileName(name) != name || !File.Exists(Path.Combine(directory, name))) continue;
                 if (episode.TryGetProperty("playlistFileName", out var playlist) && !string.IsNullOrEmpty(playlist.GetString())) continue;
-                var title = $"{anime.GetProperty("title").GetString()} · серия {episode.GetProperty("episodeNumber").GetString()} · {episode.GetProperty("quality").GetString()}";
-                result.Add(new(Path.GetFullPath(directory), name, title, ""));
+                var quality = episode.GetProperty("quality").GetString();
+                var video = new LibraryVideo(Path.GetFullPath(directory), name, "", "");
+                var marker = ReadCompletedMarker(video);
+                if (marker != null)
+                {
+                    var height = marker.Height > 0 ? marker.Height : await ReadLegacyHeightAsync(video, probe);
+                    quality = height is > 0 ? $"{height}p (FF)" : "Улучшено (FF)";
+                }
+                var title = $"{anime.GetProperty("title").GetString()} · серия {episode.GetProperty("episodeNumber").GetString()} · {quality}";
+                result.Add(video with { Title = title });
             }
         return result;
     }
 
+    /// <summary>Читает отметку успешной замены текущего файла.</summary>
+    private static EnhancementMarker? ReadCompletedMarker(LibraryVideo video)
+    {
+        if (!File.Exists(video.MarkerPath)) return null;
+        try
+        {
+            var marker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(video.MarkerPath));
+            return marker is { Version: 1, State: "Enhanced", EnhancedLength: > 0 } &&
+                marker.SourceFileName == video.FileName &&
+                marker.EnhancedHash is { Length: 64 } &&
+                marker.EnhancedHash.All(Uri.IsHexDigit) &&
+                marker.EnhancedLength == new FileInfo(video.SourcePath).Length
+                ? marker : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Получает высоту кадра для метаданных прежней версии.</summary>
+    private static async Task<int?> ReadLegacyHeightAsync(LibraryVideo video, string? probe)
+    {
+        if (!File.Exists(probe)) return null;
+        try
+        {
+            return (await VideoProbe.ReadAsync(probe!, video.SourcePath, CancellationToken.None)).Height;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            InvalidOperationException or JsonException or System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Атомарно записывает метаданные замены.</summary>
     private static void WriteMarker(LibraryVideo video, EnhancementMarker marker)
     {
         var temporary = video.MarkerPath + ".tmp";
@@ -44,6 +94,7 @@ public static class LibraryIntegration
         File.Move(temporary, video.MarkerPath, overwrite: true);
     }
 
+    /// <summary>Проверяет и публикует улучшенную серию.</summary>
     public static async Task PublishAsync(ProcessingRequest request, string resultDirectory, Action<string> log, CancellationToken token)
     {
         var video = request.Library ?? throw new ArgumentException("Нет привязки к библиотеке.");
@@ -64,8 +115,6 @@ public static class LibraryIntegration
         var enhancedHash = Hash(temporary);
         var marker = new EnhancementMarker(1, "Prepared", video.FileName, video.OriginalHash,
             enhancedHash, new FileInfo(temporary).Length, request.Profile.Name, DateTimeOffset.Now, enhanced.Width, enhanced.Height);
-        // Keep the original locked against reads/writes until the atomic replacement.
-        // Release its handle before attempting to delete the temporary backup.
         using (var exclusive = new FileStream(video.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Delete))
         {
             if (Convert.ToHexString(SHA256.HashData(exclusive)) != video.OriginalHash)
@@ -84,6 +133,7 @@ public static class LibraryIntegration
         log("Серия заменена и проверена. Временный оригинал удалён.");
     }
 
+    /// <summary>Восстанавливает оригинал после сбоя замены.</summary>
     public static void Restore(LibraryVideo video)
     {
         var marker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(video.MarkerPath))

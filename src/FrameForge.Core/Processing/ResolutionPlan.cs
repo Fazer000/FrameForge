@@ -1,9 +1,12 @@
+// Описывает масштаб модели и итоговые размеры.
 namespace FrameForge;
 
+/// <summary>Описывает масштаб модели и итоговые размеры.</summary>
 public sealed record ResolutionPlan(int Width, int Height, int ModelScale, int IntermediateWidth, int IntermediateHeight)
 {
     public bool NeedsResize => Width != IntermediateWidth || Height != IntermediateHeight;
 
+    /// <summary>Подбирает масштаб и размер с учётом пропорций.</summary>
     public static ResolutionPlan Create(int sourceWidth, int sourceHeight, int boxWidth, int boxHeight, ProcessingProfile profile)
     {
         if (sourceWidth < 2 || sourceHeight < 2 || boxWidth < 2 || boxHeight < 2 || boxWidth > 7680 || boxHeight > 7680)

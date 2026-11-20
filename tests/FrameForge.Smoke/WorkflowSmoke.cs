@@ -1,10 +1,14 @@
+// Сквозные проверки обработки и библиотеки.
 using System.Text.Json;
 using FrameForge;
 
-internal static class WorkflowSmoke
+/// <summary>Проверяет обработку и замену серии на синтетических файлах.</summary>
+public static class WorkflowSmoke
 {
+    /// <summary>Запускает сквозную проверку с установленными инструментами.</summary>
     public static async Task Run(string root, bool allProfiles = true)
     {
+        /// <summary>Находит исполняемый файл для проверки.</summary>
         string Tool(string name) => Directory.EnumerateFiles(Path.Combine(root, "tools"), name, SearchOption.AllDirectories).First();
         var ffmpeg = Tool("ffmpeg.exe"); var probe = Tool("ffprobe.exe"); var engine = Tool("video2x.exe");
         var directory = Path.Combine(root, "experiments", "workflow-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
@@ -12,12 +16,18 @@ internal static class WorkflowSmoke
         var subtitle = Path.Combine(directory, "sub.srt"); await File.WriteAllTextAsync(subtitle, "1\n00:00:00,000 --> 00:00:00,900\nFrame Forge regression\n");
         await ProcessRunner.RunAsync(ffmpeg, ["-nostdin", "-n", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24000/1001", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-i", subtitle, "-t", "1", "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0", "-c:v", "libx264", "-c:a", "aac", "-c:s", "srt", source], null, CancellationToken.None);
         var hash = LibraryIntegration.Hash(source);
+        await File.WriteAllTextAsync(Path.Combine(directory, "index.json"),
+            """{"anime":[{"title":"Проверка","episodes":[{"fileName":"episode.mkv","episodeNumber":"1","quality":"180p"},{"fileName":"episode.mkv","playlistFileName":"stream.m3u8"},{"fileName":"missing.mp4"}]}]}""");
+        var originalEntry = (await LibraryIntegration.ReadCatalogAsync(directory)).Single();
+        if (originalEntry.SourcePath != source || !originalEntry.Title.EndsWith("180p"))
+            throw new Exception("Неверный список серий библиотеки");
         var originalBytes = File.ReadAllBytes(source);
         var processor = new Video2XProcessor(); string? firstResult = null; ProcessingRequest? firstRequest = null;
         foreach (var profile in allProfiles ? ProcessingProfile.All : ProcessingProfile.All.Take(1))
         {
-            var request = new ProcessingRequest(source, directory, engine, ffmpeg, probe, profile, 480, 270, 0, 0, FullVideo: true, KeepTemporaryFiles: false);
-            var result = await processor.ProcessAsync(request, Console.WriteLine, _ => {}, CancellationToken.None);
+            var (width, height) = profile.Noise == 1 ? (640, 360) : (480, 270);
+            var request = new ProcessingRequest(source, directory, engine, ffmpeg, probe, profile, width, height, 0, 0, FullVideo: true, KeepTemporaryFiles: false, EncodingCrf: 22);
+            var result = await processor.ProcessAsync(request, Console.WriteLine, _ => { }, CancellationToken.None);
             var json = await ProcessRunner.RunAsync(probe, ["-v", "error", "-show_streams", "-of", "json", Path.Combine(result, "enhanced.mkv")], null, CancellationToken.None);
             using var doc = JsonDocument.Parse(json);
             var streams = doc.RootElement.GetProperty("streams").EnumerateArray().ToArray();
@@ -41,7 +51,18 @@ internal static class WorkflowSmoke
         var completedMarker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(video.MarkerPath));
         if (completedMarker?.State != "Enhanced" || completedMarker.EnhancedHash != LibraryIntegration.Hash(source)) throw new Exception("Published hash mismatch");
         if (completedMarker.Width != 480 || completedMarker.Height != 270) throw new Exception("Published resolution missing");
-        try { await LibraryIntegration.PublishAsync(publishRequest, firstResult!, _ => {}, CancellationToken.None); throw new Exception("Repeated replacement allowed"); }
+        if (!(await LibraryIntegration.ReadCatalogAsync(directory)).Single().Title.EndsWith("270p (FF)"))
+            throw new Exception("Catalog did not show enhanced resolution");
+        await File.WriteAllTextAsync(video.MarkerPath, JsonSerializer.Serialize(completedMarker with { Width = 0, Height = 0 }));
+        if (!(await LibraryIntegration.ReadCatalogAsync(directory, probe)).Single().Title.EndsWith("270p (FF)"))
+            throw new Exception("Catalog did not discover legacy resolution");
+        if (!(await LibraryIntegration.ReadCatalogAsync(directory)).Single().Title.EndsWith("Улучшено (FF)"))
+            throw new Exception("Legacy marker lost without ffprobe");
+        await File.WriteAllTextAsync(video.MarkerPath, JsonSerializer.Serialize(completedMarker with { EnhancedLength = 1 }));
+        if (!(await LibraryIntegration.ReadCatalogAsync(directory)).Single().Title.EndsWith("180p"))
+            throw new Exception("Catalog accepted a marker for a different file size");
+        await File.WriteAllTextAsync(video.MarkerPath, JsonSerializer.Serialize(completedMarker));
+        try { await LibraryIntegration.PublishAsync(publishRequest, firstResult!, _ => { }, CancellationToken.None); throw new Exception("Repeated replacement allowed"); }
         catch (InvalidOperationException) { }
         Console.WriteLine("PASS successful replacement: original deleted, Enhanced marker matches destination SHA256");
         var failedVideo = new LibraryVideo(directory, "cleanup-failure.mkv", "Cleanup failure", hash);
@@ -49,7 +70,8 @@ internal static class WorkflowSmoke
         FileStream? lockedBackup = null;
         try
         {
-            await LibraryIntegration.PublishAsync(publishRequest with { Library = failedVideo }, firstResult!, line => {
+            await LibraryIntegration.PublishAsync(publishRequest with { Library = failedVideo }, firstResult!, line =>
+            {
                 if (line.StartsWith("Проверка записанного", StringComparison.Ordinal))
                     lockedBackup = new FileStream(failedVideo.BackupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             }, CancellationToken.None);
@@ -64,5 +86,14 @@ internal static class WorkflowSmoke
         var marker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(failedVideo.MarkerPath));
         if (marker?.State != "Restored") throw new Exception("Marker state not restored");
         Console.WriteLine("PASS cleanup failure retains original; tamper refused; failure recovery preserves original SHA256");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        try
+        {
+            await ProcessRunner.RunAsync(ffmpeg,
+                ["-nostdin", "-re", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=1", "-t", "30", "-f", "null", "-"],
+                null, cancellation.Token);
+            throw new Exception("Процесс не отменён");
+        }
+        catch (OperationCanceledException) { }
     }
 }
