@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -6,110 +7,143 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
-
 namespace FrameForge;
 
 public partial class MainWindow : Window
 {
+    public ObservableCollection<QueueJob> Jobs { get; } = [];
     private CancellationTokenSource? cancellation;
-    private readonly string root;
+    private bool ready, closeAfterStop;
+    private readonly WorkspaceStore store;
+    private WorkspaceState state;
     private readonly IVideoProcessor processor = new Video2XProcessor();
     public MainWindow()
     {
         InitializeComponent();
-        root = FindRoot();
-        OutputPath.Text = Path.Combine(root, "experiments", "results");
-        var toolRoot = Path.Combine(root, "tools");
-        Video2XPath.Text = FindTool(toolRoot, "video2x.exe");
-        FFmpegPath.Text = FindTool(toolRoot, "ffmpeg.exe");
-        FFprobePath.Text = FindTool(toolRoot, "ffprobe.exe");
+        store = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FrameForge"));
+        try { state = store.Load(); }
+        catch (Exception ex) { MessageBox.Show(ex.Message); state = new(); Application.Current.Shutdown(); return; }
+        foreach (var job in state.Jobs) Jobs.Add(job);
+        DataContext = this;
+        var settings = state.Settings; var tools = Path.Combine(FindRoot(), "tools");
+        OutputPath.Text = settings.OutputPath;
+        Video2XPath.Text = Discover(settings.Video2X, tools, "video2x.exe");
+        FFmpegPath.Text = Discover(settings.FFmpeg, tools, "ffmpeg.exe");
+        FFprobePath.Text = Discover(settings.FFprobe, tools, "ffprobe.exe");
+        LibraryPath.Text = settings.LibraryPath;
+        if (string.IsNullOrEmpty(LibraryPath.Text)) try
+        { using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "animelib-desktop", "offline-settings.json"))); LibraryPath.Text = config.RootElement.GetProperty("downloadsPath").GetString(); }
+        catch (Exception ex) when (ex is IOException or JsonException) { }
         ProfileBox.ItemsSource = ProcessingProfile.All;
-        ProfileBox.SelectedIndex = 0;
-        var samples = Path.Combine(root, "experiments", "sources");
-        if (Directory.Exists(samples)) InputPath.Text = Directory.EnumerateFiles(samples).FirstOrDefault(p => !p.EndsWith(".json")) ?? "";
+        ProfileBox.SelectedIndex = Math.Clamp(settings.ProfileIndex, 0, ProcessingProfile.All.Length - 1);
+        ResolutionBox.SelectedIndex = (settings.Width, settings.Height) switch { (1920, 1080) => 0, (2560, 1440) => 1, (3840, 2160) => 2, _ => 3 };
+        TargetWidthBox.Text = settings.Width.ToString(); TargetHeightBox.Text = settings.Height.ToString();
+        FullVideoBox.IsChecked = settings.FullVideo; KeepTemporaryBox.IsChecked = settings.KeepTemporary; RangePanel.IsEnabled = !settings.FullVideo;
+        ready = true; Log("Очередь: " + store.DirectoryPath + ". Прерванные задания повторяются с начала вручную.");
     }
-    private static string FindRoot()
+    private static string FindRoot() { for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent) if (File.Exists(Path.Combine(d.FullName, "frame-forge.sln"))) return d.FullName; return AppContext.BaseDirectory; }
+    private static string Discover(string current, string root, string name) => File.Exists(current) ? current : Directory.Exists(root) ? Directory.EnumerateFiles(root, name, SearchOption.AllDirectories).FirstOrDefault() ?? "" : "";
+    private static string? Pick(string filter) { var d = new OpenFileDialog { Filter = filter }; return d.ShowDialog() == true ? d.FileName : null; }
+    private void Save()
     {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-            if (File.Exists(Path.Combine(dir.FullName, "frame-forge.sln"))) return dir.FullName;
-        return AppContext.BaseDirectory;
+        state.Settings = new() { OutputPath = OutputPath.Text, Video2X = Video2XPath.Text, FFmpeg = FFmpegPath.Text, FFprobe = FFprobePath.Text, LibraryPath = LibraryPath.Text, ProfileIndex = ProfileBox.SelectedIndex,
+            Width = int.TryParse(TargetWidthBox.Text, out var w) ? w : 1920, Height = int.TryParse(TargetHeightBox.Text, out var h) ? h : 1080, FullVideo = FullVideoBox.IsChecked == true, KeepTemporary = KeepTemporaryBox.IsChecked == true };
+        state.Jobs = Jobs.ToList(); store.Save(state);
     }
-    private static string FindTool(string dir, string name) => Directory.Exists(dir)
-        ? Directory.EnumerateFiles(dir, name, SearchOption.AllDirectories).FirstOrDefault() ?? "" : "";
-    private static string? Pick(string filter) { var dialog = new OpenFileDialog { Filter = filter }; return dialog.ShowDialog() == true ? dialog.FileName : null; }
-    private async void ChooseInput(object sender, RoutedEventArgs e)
+    private ProcessingRequest Request(string input, LibraryVideo? library = null)
     {
-        var file = Pick("Видео|*.mp4;*.mkv;*.avi;*.mov;*.webm;*.ts;*.m4v;*.bin|Все файлы|*.*");
-        if (file == null) return;
-        InputPath.Text = file;
-        SettingsPanel.IsEnabled = false;
-        RunButton.IsEnabled = false;
+        if (!int.TryParse(TargetWidthBox.Text, out var w) || !int.TryParse(TargetHeightBox.Text, out var h) || w < 2 || h < 2 || w > 7680 || h > 7680) throw new ArgumentException("Укажите разрешение от 2 до 7680 пикселей.");
+        var full = FullVideoBox.IsChecked == true; double start = 0, duration = 0;
+        if (!full && (!Seconds(StartSeconds.Text, out start) || !Seconds(DurationSeconds.Text, out duration) || !double.IsFinite(start) || !double.IsFinite(duration) || start < 0 || duration <= 0 || duration > 300)) throw new ArgumentException("Укажите начало ≥ 0 и длину фрагмента до 300 секунд.");
+        if (library != null && !full) throw new ArgumentException("Для замены серии выберите обработку видео целиком.");
+        foreach (var tool in new[] { Video2XPath.Text, FFmpegPath.Text, FFprobePath.Text }) if (!File.Exists(tool)) throw new FileNotFoundException("Выберите инструменты в настройках.", tool);
+        return new(input, OutputPath.Text, Video2XPath.Text, FFmpegPath.Text, FFprobePath.Text, (ProcessingProfile)ProfileBox.SelectedItem, w, h, start, duration, full, KeepTemporaryBox.IsChecked == true, library);
+    }
+    private void AddFiles(object sender, RoutedEventArgs e)
+    {
+        var d = new OpenFileDialog { Multiselect = true, Filter = "Видео|*.mp4;*.mkv;*.avi;*.mov;*.webm;*.ts;*.m4v;*.bin|Все файлы|*.*" }; if (d.ShowDialog() != true) return;
+        try { var requests = d.FileNames.Select(f => Request(f)).ToArray(); foreach (var r in requests) Jobs.Add(new() { Request = r }); Save(); } catch (Exception ex) { MessageBox.Show(ex.Message); }
+    }
+    private async void AddLibrary(object sender, RoutedEventArgs e)
+    {
         try
         {
-            var info = await VideoProbe.ReadAsync(FFprobePath.Text, file, CancellationToken.None);
-            VideoInfo.Text = $"{info.Width} × {info.Height} · {info.Codec} · FPS {info.FrameRate} · {TimeSpan.FromSeconds(info.Duration):hh\\:mm\\:ss}";
+            var list = new ListBox { ItemsSource = LibraryIntegration.ReadCatalog(LibraryPath.Text), SelectionMode = SelectionMode.Extended, Margin = new Thickness(12) };
+            var button = new Button { Content = "Добавить выбранные", Margin = new Thickness(12) }; var panel = new DockPanel(); DockPanel.SetDock(button, Dock.Bottom); panel.Children.Add(button); panel.Children.Add(list);
+            var dialog = new Window { Title = "Серии AnimeLib", Owner = this, Width = 850, Height = 550, Content = panel, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+            List<LibraryVideo> chosen = []; button.Click += (_, _) => { chosen = list.SelectedItems.Cast<LibraryVideo>().ToList(); if (chosen.Count > 0) dialog.DialogResult = true; };
+            if (dialog.ShowDialog() != true) return;
+            SettingsPanel.IsEnabled = false;
+            try
+            {
+                var requests = new List<ProcessingRequest>();
+                foreach (var video in chosen)
+                {
+                    if (File.Exists(video.BackupPath)) throw new IOException("Серия уже заменена или требует восстановления: " + video.Title);
+                    var hash = await Task.Run(() => LibraryIntegration.Hash(video.SourcePath)); requests.Add(Request(video.SourcePath, video with { OriginalHash = hash }));
+                }
+                foreach (var r in requests) Jobs.Add(new() { Request = r }); Save();
+            }
+            finally { SettingsPanel.IsEnabled = true; }
         }
-        catch (Exception ex) { VideoInfo.Text = "Не удалось прочитать видео: " + ex.Message; }
-        finally { SettingsPanel.IsEnabled = true; RunButton.IsEnabled = true; }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Библиотека AnimeLib"); }
     }
-    private void ChooseOutput(object sender, RoutedEventArgs e)
-    { var dialog = new OpenFolderDialog(); if (dialog.ShowDialog() == true) OutputPath.Text = dialog.FolderName; }
-    private void ChooseVideo2X(object sender, RoutedEventArgs e) { if (Pick("Video2X|video2x.exe") is { } p) Video2XPath.Text = p; }
-    private void ChooseFFmpeg(object sender, RoutedEventArgs e) { if (Pick("FFmpeg|ffmpeg.exe") is { } p) FFmpegPath.Text = p; }
-    private void ChooseFFprobe(object sender, RoutedEventArgs e) { if (Pick("ffprobe|ffprobe.exe") is { } p) FFprobePath.Text = p; }
-    private void Log(string line) => Dispatcher.InvokeAsync(() => {
-        if (LogBox.Text.Length > 100_000) LogBox.Text = LogBox.Text[^50_000..];
-        LogBox.AppendText(line + Environment.NewLine); LogBox.ScrollToEnd();
-    });
     private async void Run(object sender, RoutedEventArgs e)
     {
-        if (!TrySeconds(StartSeconds.Text, out var start) || !TrySeconds(DurationSeconds.Text, out var duration))
-        { MessageBox.Show("Начало и длительность должны быть числами в секундах."); return; }
-        if (!int.TryParse(TargetWidthBox.Text, out var width) || !int.TryParse(TargetHeightBox.Text, out var height))
-        { MessageBox.Show("Укажите ширину и высоту в целых пикселях."); return; }
-        var request = new ProcessingRequest(InputPath.Text, OutputPath.Text, Video2XPath.Text, FFmpegPath.Text,
-            FFprobePath.Text, (ProcessingProfile)ProfileBox.SelectedItem, width, height, start, duration);
-        cancellation = new CancellationTokenSource();
-        SettingsPanel.IsEnabled = false; RunButton.IsEnabled = false; CancelButton.IsEnabled = true;
-        Progress.Value = 0; Progress.IsIndeterminate = true; LogBox.Clear(); StatusText.Text = "Подготовка и обработка…";
+        if (cancellation != null) return;
+        cancellation = new(); RunButton.IsEnabled = false; CancelButton.IsEnabled = true;
         try
         {
-            var result = await processor.ProcessAsync(request, Log, p => Dispatcher.InvokeAsync(() => {
-                Progress.IsIndeterminate = false; Progress.Value = p; StatusText.Text = $"Обработка: {p:F0}%";
-            }), cancellation.Token);
-            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result, "report.json")));
-            var warned = report.RootElement.GetProperty("Status").GetString() == "CompletedWithWarning";
-            Progress.IsIndeterminate = false; Progress.Value = 100;
-            StatusText.Text = warned ? "Результат проверен, но Video2X завершился со сбоем. См. журнал и report.json." : "Готово. Результат проверен.";
-            Log("Готово: " + result);
+            Save();
+            while (!cancellation.IsCancellationRequested && Jobs.FirstOrDefault(j => j.Status == "Ожидает") is { } job)
+            {
+                job.Status = "Обработка"; job.Progress = 0; job.Error = ""; Save(); JobsGrid.SelectedItem = job; LogBox.Clear(); StatusText.Text = job.Name; Progress.IsIndeterminate = true;
+                try
+                {
+                    job.ResultPath = await processor.ProcessAsync(job.Request, Log, p => Dispatcher.InvokeAsync(() => { job.Progress = p; Progress.IsIndeterminate = false; Progress.Value = p; }), cancellation.Token);
+                    if (job.Request.Library != null) await LibraryIntegration.PublishAsync(job.Request, job.ResultPath, Log, cancellation.Token);
+                    using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(job.ResultPath, "report.json")));
+                    job.Status = report.RootElement.GetProperty("Status").GetString() == "CompletedWithWarning" ? "С предупреждением" : "Готово"; job.Progress = 100;
+                }
+                catch (OperationCanceledException) { job.Status = "Отменено"; job.Error = "Отменено пользователем"; }
+                catch (Exception ex) { job.Status = "Ошибка"; job.Error = ex.Message; Log(ex.Message); }
+                Save();
+            }
+            StatusText.Text = cancellation.IsCancellationRequested ? "Очередь остановлена. Ожидающие задания сохранены." : "Очередь завершена";
         }
-        catch (OperationCanceledException) { StatusText.Text = "Отменено. Незавершённые файлы остаются в папке задания."; }
-        catch (Exception ex) { StatusText.Text = "Ошибка обработки — подробности в журнале"; Log(ex.Message); }
-        finally
-        {
-            Progress.IsIndeterminate = false; SettingsPanel.IsEnabled = true; RunButton.IsEnabled = true;
-            CancelButton.IsEnabled = false; cancellation.Dispose(); cancellation = null;
-        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Очередь остановлена"); }
+        finally { cancellation.Dispose(); cancellation = null; RunButton.IsEnabled = true; CancelButton.IsEnabled = false; Progress.IsIndeterminate = false; if (closeAfterStop) Close(); }
     }
-    private static bool TrySeconds(string s, out double value) => double.TryParse(s.Replace(',', '.'), CultureInfo.InvariantCulture, out value);
-    private void ResolutionChanged(object sender, SelectionChangedEventArgs e)
+    private void Retry(object sender, RoutedEventArgs e) { if (JobsGrid.SelectedItem is QueueJob job && job.Status is "Ошибка" or "Отменено" or "Прервано") { job.Status = "Ожидает"; job.Progress = 0; TrySave(); } }
+    private void Remove(object sender, RoutedEventArgs e)
     {
-        if (TargetWidthBox == null || TargetHeightBox == null || ResolutionBox.SelectedItem is not ComboBoxItem item) return;
-        var tag = item.Tag.ToString()!;
-        TargetWidthBox.IsEnabled = TargetHeightBox.IsEnabled = tag == "custom";
-        if (tag != "custom") { var dimensions = tag.Split(','); TargetWidthBox.Text = dimensions[0]; TargetHeightBox.Text = dimensions[1]; }
+        if (JobsGrid.SelectedItem is not QueueJob job || job.Status == "Обработка") return;
+        if (job.Request.Library is { } video && File.Exists(video.BackupPath))
+        { MessageBox.Show("Осталась временная копия после ошибки замены. Проверьте журнал перед удалением задания."); return; }
+        Jobs.Remove(job); TrySave();
     }
-    private void Cancel(object sender, RoutedEventArgs e) { cancellation?.Cancel(); CancelButton.IsEnabled = false; }
-    private void OpenResults(object sender, RoutedEventArgs e)
+    private void TrySave() { try { Save(); } catch (Exception ex) { MessageBox.Show(ex.Message); } }
+    private void JobSelected(object sender, SelectionChangedEventArgs e)
     {
-        try { Directory.CreateDirectory(OutputPath.Text); Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { OutputPath.Text }, UseShellExecute = true }); }
-        catch (Exception ex) { MessageBox.Show(ex.Message); }
+        if (!ready || cancellation != null || JobsGrid.SelectedItem is not QueueJob job) return;
+        StatusText.Text = job.Profile + " · " + job.Range; LogBox.Text = job.Error; var file = Path.Combine(job.ResultPath, "processing.log");
+        if (File.Exists(file)) try { var text = File.ReadAllText(file); LogBox.Text += "\n" + text[^Math.Min(text.Length, 50_000)..]; } catch (IOException) { }
     }
-    private void OnClosing(object? sender, CancelEventArgs e)
+    private void ChooseOutput(object s, RoutedEventArgs e) { var d = new OpenFolderDialog(); if (d.ShowDialog() == true) OutputPath.Text = d.FolderName; }
+    private void ChooseLibrary(object s, RoutedEventArgs e) { var d = new OpenFolderDialog(); if (d.ShowDialog() == true) LibraryPath.Text = d.FolderName; }
+    private void ChooseVideo2X(object s, RoutedEventArgs e) { if (Pick("Video2X|video2x.exe") is { } p) Video2XPath.Text = p; }
+    private void ChooseFFmpeg(object s, RoutedEventArgs e) { if (Pick("FFmpeg|ffmpeg.exe") is { } p) FFmpegPath.Text = p; }
+    private void ChooseFFprobe(object s, RoutedEventArgs e) { if (Pick("ffprobe|ffprobe.exe") is { } p) FFprobePath.Text = p; }
+    private static bool Seconds(string s, out double value) => double.TryParse(s.Replace(',', '.'), CultureInfo.InvariantCulture, out value);
+    private void ResolutionChanged(object s, SelectionChangedEventArgs e) { if (TargetWidthBox == null || TargetHeightBox == null || ResolutionBox.SelectedItem is not ComboBoxItem item) return; var tag = item.Tag.ToString()!; TargetWidthBox.IsEnabled = TargetHeightBox.IsEnabled = tag == "custom"; if (tag != "custom") { var sizes = tag.Split(','); TargetWidthBox.Text = sizes[0]; TargetHeightBox.Text = sizes[1]; } }
+    private void RangeChanged(object s, RoutedEventArgs e) { if (RangePanel != null) RangePanel.IsEnabled = FullVideoBox.IsChecked != true; }
+    private void Cancel(object s, RoutedEventArgs e) { cancellation?.Cancel(); CancelButton.IsEnabled = false; }
+    private void Log(string line) => Dispatcher.InvokeAsync(() => { if (LogBox.Text.Length > 100_000) LogBox.Text = LogBox.Text[^50_000..]; LogBox.AppendText(line + Environment.NewLine); LogBox.ScrollToEnd(); });
+    private void OpenResults(object s, RoutedEventArgs e) { try { var path = JobsGrid.SelectedItem is QueueJob { ResultPath.Length: > 0 } job ? job.ResultPath : OutputPath.Text; Directory.CreateDirectory(path); Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { path }, UseShellExecute = true }); } catch (Exception ex) { MessageBox.Show(ex.Message); } }
+    private void OnClosing(object? s, CancelEventArgs e)
     {
-        if (cancellation == null) return;
-        e.Cancel = true;
-        cancellation.Cancel();
-        StatusText.Text = "Отменяем обработку. После остановки окно можно закрыть.";
+        if (!ready) return;
+        if (cancellation != null) { e.Cancel = true; closeAfterStop = true; Cancel(this, new()); StatusText.Text = "Останавливаем процесс и сохраняем очередь…"; return; }
+        try { Save(); } catch (Exception ex) { e.Cancel = true; closeAfterStop = false; MessageBox.Show("Не удалось сохранить очередь: " + ex.Message); }
     }
 }

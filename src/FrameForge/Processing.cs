@@ -60,7 +60,7 @@ public static class ProcessRunner
             int count;
             while ((count = await reader.ReadAsync(buffer)) > 0)
             {
-                if (capture) output.Append(buffer, 0, count);
+                if (capture && output.Length < 4_000_000) output.Append(buffer, 0, count);
                 for (var i = 0; i < count; i++)
                     if (buffer[i] is '\r' or '\n') Emit();
                     else { pending.Append(buffer[i]); if (pending.Length > 8192) Emit(); }
@@ -96,7 +96,8 @@ public static class VideoProbe
 }
 
 public record ProcessingRequest(string Input, string OutputRoot, string Video2X, string FFmpeg,
-    string FFprobe, ProcessingProfile Profile, int TargetWidth, int TargetHeight, double Start, double Duration);
+    string FFprobe, ProcessingProfile Profile, int TargetWidth, int TargetHeight, double Start, double Duration,
+    bool FullVideo = false, bool KeepTemporaryFiles = true, LibraryVideo? Library = null);
 
 public interface IVideoProcessor
 {
@@ -130,25 +131,34 @@ public sealed class Video2XProcessor : IVideoProcessor
     {
         foreach (var file in new[] { r.Input, r.Video2X, r.FFmpeg, r.FFprobe })
             if (!File.Exists(file)) throw new FileNotFoundException("Файл не найден", file);
-        if (!double.IsFinite(r.Start) || !double.IsFinite(r.Duration) || r.Start < 0 || r.Duration <= 0 || r.Duration > 300)
+        if (r.Library != null && LibraryIntegration.Hash(r.Input) != r.Library.OriginalHash)
+            throw new IOException("Файл серии изменился. Восстановите оригинал или добавьте серию заново.");
+        if (!r.FullVideo && (!double.IsFinite(r.Start) || !double.IsFinite(r.Duration) || r.Start < 0 || r.Duration <= 0 || r.Duration > 300))
             throw new ArgumentException("Укажите начало ≥ 0 и длительность от 0 до 300 секунд.");
         var source = await VideoProbe.ReadAsync(r.FFprobe, r.Input, token);
+        var expectedDuration = r.FullVideo ? source.Duration : r.Duration;
+        if (!double.IsFinite(expectedDuration) || expectedDuration <= 0) throw new ArgumentException("Не удалось определить длительность видео.");
         var plan = ResolutionPlan.Create(source.Width, source.Height, r.TargetWidth, r.TargetHeight, r.Profile);
-        if (source.Duration > 0 && r.Start + r.Duration > source.Duration + 0.1)
+        if (!r.FullVideo && source.Duration > 0 && r.Start + r.Duration > source.Duration + 0.1)
             throw new ArgumentException("Фрагмент выходит за длительность видео.");
         // A fresh job directory prevents collisions and any input overwrite.
         var directory = Path.Combine(Path.GetFullPath(r.OutputRoot),
             $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}");
         Directory.CreateDirectory(directory);
-        var clip = Path.Combine(directory, "reference.mkv");
+        var clip = r.FullVideo ? r.Input : Path.Combine(directory, "reference.mkv");
         var partial = Path.Combine(directory, "enhanced.partial.mkv");
         var intermediate = plan.NeedsResize ? Path.Combine(directory, "model-output.mkv") : partial;
         var output = Path.Combine(directory, "enhanced.mkv");
         var timer = Stopwatch.StartNew();
         var report = Path.Combine(directory, "report.json");
         string? warning = null;
+        using var journal = new StreamWriter(Path.Combine(directory, "processing.log"), append: false, Encoding.UTF8) { AutoFlush = true };
+        var notify = log;
+        log = line => { lock (journal) journal.WriteLine($"{DateTimeOffset.Now:O} {line}"); notify(line); };
         try
         {
+            if (!r.FullVideo)
+            {
             log("Подготовка эталонного фрагмента без потерь (FFV1)…");
             await ProcessRunner.RunAsync(r.FFmpeg,
                 ["-nostdin", "-n", "-v", "warning", "-i", r.Input, "-ss", r.Start.ToString(CultureInfo.InvariantCulture),
@@ -156,6 +166,8 @@ public sealed class Video2XProcessor : IVideoProcessor
                  // Trimming may produce an initial audio frame shorter than FLAC's minimum
                  // block size. PCM accepts it and preserves decoded floating-point audio.
                  "-c:v", "ffv1", "-level", "3", "-c:a", "pcm_f32le", clip], log, token);
+            }
+            else log("Обработка полного видео. Исходный файл читается напрямую.");
             log($"Обработка: {r.Profile.Name}. {source.Width}×{source.Height} → модель {plan.ModelScale}× → {plan.Width}×{plan.Height}. GPU 0.\nКаталог: {directory}");
             var args = BuildArguments(r.Profile, plan.ModelScale, clip, intermediate, plan.NeedsResize);
             try { await ProcessRunner.RunAsync(r.Video2X, args, line => {
@@ -175,6 +187,7 @@ public sealed class Video2XProcessor : IVideoProcessor
                 log($"Приведение к {plan.Width}×{plan.Height}, Lanczos. Промежуточный файл без потерь.");
                 await ProcessRunner.RunAsync(r.FFmpeg,
                     ["-nostdin", "-n", "-v", "warning", "-xerror", "-i", intermediate, "-map", "0:v:0", "-map", "0:a?",
+                     "-map", "0:s?", "-map", "0:t?", "-c:s", "copy", "-c:t", "copy",
                      "-vf", $"scale={plan.Width}:{plan.Height}:flags=lanczos,setsar=1", "-c:v", "libx264", "-crf", "16",
                      "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy", partial], log, token);
             }
@@ -184,7 +197,7 @@ public sealed class Video2XProcessor : IVideoProcessor
                 ["-nostdin", "-v", "error", "-xerror", "-i", partial, "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"], log, token);
             var result = await VideoProbe.ReadAsync(r.FFprobe, partial, token);
             if (result.Width != plan.Width || result.Height != plan.Height ||
-                result.Duration <= 0 || Math.Abs(result.Duration - r.Duration) > 1)
+                result.Duration <= 0 || Math.Abs(result.Duration - expectedDuration) > 1 || result.FrameRate != source.FrameRate)
                 throw new InvalidOperationException("Результат не прошёл проверку размера или длительности.");
             token.ThrowIfCancellationRequested();
             File.Move(partial, output, overwrite: false);
@@ -193,6 +206,12 @@ public sealed class Video2XProcessor : IVideoProcessor
                 ElapsedSeconds = timer.Elapsed.TotalSeconds, OutputBytes = new FileInfo(output).Length,
                 CompletedAt = DateTimeOffset.Now
             }, new JsonSerializerOptions { WriteIndented = true }));
+            if (!r.KeepTemporaryFiles)
+            {
+                // Only explicitly owned temporary files, never a recursive directory delete.
+                foreach (var temporary in new[] { r.FullVideo ? null : clip, plan.NeedsResize ? intermediate : null })
+                    if (temporary != null) try { File.Delete(temporary); } catch (IOException ex) { log("Не удалось удалить временный файл: " + ex.Message); }
+            }
             progress(100);
             return directory;
         }

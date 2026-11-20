@@ -3,6 +3,8 @@ using System.Text.Json;
 using FrameForge;
 
 var root = Path.GetFullPath(args.Length > 0 ? args[0] : ".");
+if (args.Contains("--workflow")) { await WorkflowSmoke.Run(root); return; }
+if (args.Contains("--library-cleanup")) { await WorkflowSmoke.Run(root, allProfiles: false); return; }
 string Tool(string name) => Directory.EnumerateFiles(Path.Combine(root, "tools"), name, SearchOption.AllDirectories).First();
 var audioRegression = args.Contains("--audio-regression");
 var input = audioRegression
