@@ -10,10 +10,11 @@ namespace FrameForge;
 public record ProcessingProfile(string Name, string Processor, string Model, int Noise)
 {
     public static readonly ProcessingProfile[] All = [
-        new("Аниме · Высокое · Real-CUGAN", "realcugan", "models-se", 0),
+        new("Аниме · Высокое / без шумоподавления · Real-CUGAN", "realcugan", "models-se", -1),
         new("Аниме · Высокое + очистка · Real-CUGAN", "realcugan", "models-se", 1),
         new("Аниме · Базовое · Real-ESRGAN Video v3", "realesrgan", "realesr-animevideov3", 0),
-        new("Обычное видео · Real-ESRGAN Plus", "realesrgan", "realesrgan-plus", 0)
+        new("Обычное видео · Real-ESRGAN Plus", "realesrgan", "realesrgan-plus", 0),
+        new("Аниме · Real-CUGAN Pro / консервативный", "realcugan", "models-pro", 0)
     ];
 }
 
@@ -107,14 +108,20 @@ public sealed class Video2XProcessor : IVideoProcessor
 {
     public static string[] BuildArguments(ProcessingProfile profile, int scale, string input, string output, bool lossless = false)
     {
-        if (scale is not (2 or 4)) throw new ArgumentException("Масштаб должен быть 2 или 4.");
+        if (scale is not (2 or 3 or 4)) throw new ArgumentException("Масштаб должен быть 2, 3 или 4.");
+        if (profile.Model == "models-pro" && scale == 4)
+            throw new ArgumentException("Real-CUGAN Pro поддерживает только 2× и 3×.");
         if (profile.Model == "realesrgan-plus" && scale != 4)
             throw new ArgumentException("Real-ESRGAN Plus требует масштаб 4×.");
         if (profile.Processor == "realcugan" && profile.Noise == 1 && scale != 2)
             throw new ArgumentException("Real-CUGAN SE с очисткой уровня 1 поддерживает в прототипе только 2×.");
+        // Video2X 6.4.0 initializes noise_level to -1, but its CLI validator
+        // incorrectly rejects explicit negative values. Omit the option for the
+        // default no-denoise mode; do not substitute conservative noise=0.
+        string[] noiseArgs = profile.Noise == -1 ? [] : ["-n", profile.Noise.ToString(CultureInfo.InvariantCulture)];
         string[] common = ["-i", input, "-o", output, "-p", profile.Processor,
             $"--{profile.Processor}-model", profile.Model, "-s", scale.ToString(),
-            "-n", profile.Noise.ToString(), "-d", "0", "-c", lossless ? "ffv1" : "libx264", "--pix-fmt", "yuv420p"];
+            ..noiseArgs, "-d", "0", "-c", lossless ? "ffv1" : "libx264", "--pix-fmt", "yuv420p"];
         return lossless ? common : [..common, "-e", "crf=16", "-e", "preset=medium"];
     }
 

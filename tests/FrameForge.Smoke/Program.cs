@@ -14,6 +14,30 @@ var probe = Tool("ffprobe.exe");
 var video2x = Tool("video2x.exe");
 var processor = new Video2XProcessor();
 var profiles = ProcessingProfile.All;
+if (args.Contains("--pro-only"))
+{
+    var pro = profiles.Single(p => p.Model == "models-pro");
+    var source = await VideoProbe.ReadAsync(probe, input, CancellationToken.None);
+    // Exercise both Pro weight sets and the resize path, relative to the actual test source.
+    foreach (var factor in new[] { 1.5, 3.0 })
+    {
+        var width = (int)(source.Width * factor) / 2 * 2;
+        var height = (int)(source.Height * factor) / 2 * 2;
+        var result = await processor.ProcessAsync(new ProcessingRequest(input,
+            Path.Combine(root, "experiments", "pro-smoke"), video2x, ffmpeg, probe, pro,
+            width, height, 60, 1), Console.WriteLine, _ => {}, CancellationToken.None);
+        var actual = await VideoProbe.ReadAsync(probe, Path.Combine(result, "enhanced.mkv"), CancellationToken.None);
+        if (actual.Width != width || actual.Height != height) throw new Exception("Pro output resolution mismatch");
+        Console.WriteLine($"PASS Pro {factor}× target: {width}×{height}, {result}");
+    }
+    try { ResolutionPlan.Create(1280, 720, 5120, 2880, pro); throw new Exception("Expected Pro 4× rejection"); }
+    catch (ArgumentException) { Console.WriteLine("PASS Pro 4× rejected before processing"); }
+    try { Video2XProcessor.BuildArguments(pro, 4, "in", "out"); throw new Exception("Expected Pro CLI 4× rejection"); }
+    catch (ArgumentException) { Console.WriteLine("PASS Pro CLI rejects missing 4× weights"); }
+    if (!before.SequenceEqual(SHA256.HashData(File.ReadAllBytes(input)))) throw new Exception("Input changed");
+    Console.WriteLine("PASS source hash unchanged");
+    return;
+}
 var wide = ResolutionPlan.Create(1920, 800, 1920, 1080, profiles[0]);
 if (wide.Width != 1920 || wide.Height != 800) throw new Exception("Aspect ratio not preserved");
 var portrait = ResolutionPlan.Create(720, 1280, 1920, 1080, profiles[0]);
@@ -23,7 +47,10 @@ if (plus.ModelScale != 4 || plus.Width != 1920 || !plus.NeedsResize) throw new E
 try { ResolutionPlan.Create(320, 180, 7680, 4320, profiles[0]); throw new Exception("Expected scale rejection"); }
 catch (ArgumentException) { }
 Console.WriteLine("PASS resolution planning: wide / portrait / Plus / excessive scale");
-foreach (var profile in audioRegression ? profiles.Take(1) : profiles)
+var selectedProfiles = args.Contains("--no-denoise-only")
+    ? profiles.Where(p => p.Processor == "realcugan" && p.Noise == -1)
+    : audioRegression ? profiles.Take(1) : profiles;
+foreach (var profile in selectedProfiles)
 {
     Console.WriteLine($"TEST {profile.Name}");
     var request = new ProcessingRequest(input, Path.Combine(root, "experiments", "smoke"), video2x, ffmpeg,
