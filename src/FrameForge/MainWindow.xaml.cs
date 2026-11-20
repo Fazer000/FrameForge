@@ -150,9 +150,19 @@ public partial class MainWindow : Window
     private void Remove(object sender, RoutedEventArgs e)
     {
         if (JobsGrid.SelectedItem is not QueueJob job || job.Status == "Обработка") return;
+        var index = Jobs.IndexOf(job);
+        Jobs.RemoveAt(index);
+        try { Save(); }
+        catch (Exception ex)
+        {
+            Jobs.Insert(index, job);
+            JobsGrid.SelectedItem = job;
+            MessageBox.Show("Не удалось убрать задание: " + ex.Message);
+            return;
+        }
+
         if (job.Request.Library is { } video && File.Exists(video.BackupPath))
-        { MessageBox.Show("Осталась временная копия после ошибки замены. Проверьте журнал перед удалением задания."); return; }
-        Jobs.Remove(job); TrySave();
+            Log("Задание убрано из очереди. Временный оригинал сохранён: " + video.BackupPath);
     }
     /// <summary>Сохраняет изменения и показывает ошибку.</summary>
     private void TrySave() { try { Save(); } catch (Exception ex) { MessageBox.Show(ex.Message); } }

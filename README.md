@@ -29,7 +29,7 @@ dotnet run --project src/FrameForge -c Release --no-build
 
 ### Сборка установщика
 
-Установите [Inno Setup 6](https://jrsoftware.org/inno-setup/downloads) и выполните из корня проекта в PowerShell 7:
+Установите [Inno Setup 6](https://jrsoftware.org/inno-setup/downloads) и выполните из корня проекта в Windows PowerShell 5.1 или PowerShell 7:
 
 ```powershell
 ./installer/Build-Installer.ps1

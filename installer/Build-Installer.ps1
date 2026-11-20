@@ -1,4 +1,4 @@
-# Собирает установщик Frame Forge для Windows x64.
+﻿# Собирает установщик Frame Forge для Windows x64.
 [CmdletBinding()]
 param(
     [string]$Compiler = '',
