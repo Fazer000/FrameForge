@@ -141,4 +141,21 @@ public sealed class ProcessingTests
             new("video", "png")
         }, tracks);
     }
+
+    /// <summary>Проверяет порядок меню и совместимость сохранённых индексов.</summary>
+    [Fact]
+    public void ShowsProfilesInMenuOrder()
+    {
+        var profiles = ProcessingProfile.MenuOrder;
+        Assert.Equal(new[] { 3, 4, 1, 0, 2 },
+            profiles.Select(profile => Array.IndexOf(ProcessingProfile.All, profile)));
+        Assert.Equal(new[]
+        {
+            "Кино · Высокое · Real-ESRGAN Plus",
+            "Аниме · Высокое · Real-CUGAN Pro",
+            "Аниме · Высокое · Real-CUGAN + шумоподавление",
+            "Аниме · Высокое · Real-CUGAN",
+            "Аниме · Базовое · Real-ESRGAN Video v3"
+        }, profiles.Select(profile => profile.Name));
+    }
 }

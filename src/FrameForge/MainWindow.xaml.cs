@@ -43,8 +43,8 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(LibraryPath.Text)) try
             { using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "animelib-desktop", "offline-settings.json"))); LibraryPath.Text = config.RootElement.GetProperty("downloadsPath").GetString(); }
             catch (Exception ex) when (ex is IOException or JsonException) { }
-        ProfileBox.ItemsSource = ProcessingProfile.All;
-        ProfileBox.SelectedIndex = Math.Clamp(settings.ProfileIndex, 0, ProcessingProfile.All.Length - 1);
+        ProfileBox.ItemsSource = ProcessingProfile.MenuOrder;
+        ProfileBox.SelectedItem = ProcessingProfile.All[Math.Clamp(settings.ProfileIndex, 0, ProcessingProfile.All.Length - 1)];
         ResolutionBox.SelectedIndex = (settings.Width, settings.Height) switch { (1920, 1080) => 0, (2560, 1440) => 1, (3840, 2160) => 2, _ => 3 };
         TargetWidthBox.Text = settings.Width.ToString(); TargetHeightBox.Text = settings.Height.ToString();
         EncodingBox.SelectedIndex = settings.EncodingCrf switch { 20 => 1, 16 => 2, _ => 0 };
@@ -74,7 +74,7 @@ public partial class MainWindow : Window
             FFmpeg = state.Settings.FFmpeg,
             FFprobe = state.Settings.FFprobe,
             LibraryPath = LibraryPath.Text,
-            ProfileIndex = ProfileBox.SelectedIndex,
+            ProfileIndex = Array.IndexOf(ProcessingProfile.All, (ProcessingProfile)ProfileBox.SelectedItem),
             Width = int.TryParse(TargetWidthBox.Text, out var w) ? w : 1920,
             Height = int.TryParse(TargetHeightBox.Text, out var h) ? h : 1080,
             FullVideo = FullVideoBox.IsChecked == true,
@@ -136,7 +136,7 @@ public partial class MainWindow : Window
             }));
             var list = new ListBox { ItemsSource = videos, SelectionMode = SelectionMode.Extended, Margin = new Thickness(12) };
             var button = new Button { Content = "Добавить выбранные", Margin = new Thickness(12) }; var panel = new DockPanel(); DockPanel.SetDock(button, Dock.Bottom); panel.Children.Add(button); panel.Children.Add(list);
-            var dialog = new Window { Title = "Серии AnimeLib", Owner = this, Icon = Icon, Width = 850, Height = 550, Content = panel, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+            var dialog = new Window { Title = "Серии AnimeLib", Owner = this, Icon = Icon, Background = Background, Width = 850, Height = 550, Content = panel, WindowStartupLocation = WindowStartupLocation.CenterOwner };
             List<LibraryVideo> chosen = []; button.Click += (_, _) => { chosen = list.SelectedItems.Cast<LibraryVideo>().ToList(); if (chosen.Count > 0) dialog.DialogResult = true; };
             if (dialog.ShowDialog() != true) return;
             await WhileLoadingAsync(async () =>
