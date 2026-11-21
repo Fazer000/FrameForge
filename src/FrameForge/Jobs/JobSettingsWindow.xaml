@@ -1,0 +1,18 @@
+<!-- Диалог изменения параметров задания. -->
+<Window x:Class="FrameForge.JobSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FrameForge"
+        Title="Параметры задания" Icon="/Assets/FrameForge.ico" Width="460" SizeToContent="Height"
+        ResizeMode="NoResize" ShowInTaskbar="False" WindowStartupLocation="CenterOwner"
+        Background="{StaticResource WindowBrush}" FontFamily="Segoe UI" FontSize="14">
+  <StackPanel Margin="24" TextElement.Foreground="{StaticResource TextBrush}">
+    <TextBlock x:Name="JobNameText" Margin="0,0,0,16" TextWrapping="Wrap" FontWeight="SemiBold"/>
+    <local:ProcessingSettingsPanel x:Name="EditSettings"/>
+    <StackPanel Margin="0,10,0,0" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Content="Отмена" IsCancel="True"/>
+      <Button Content="Сохранить" IsDefault="True" Click="SaveSettings" Margin="0"
+              Style="{StaticResource PrimaryButtonStyle}"/>
+    </StackPanel>
+  </StackPanel>
+</Window>

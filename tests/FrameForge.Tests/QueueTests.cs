@@ -110,6 +110,87 @@ public sealed class QueueTests : IDisposable
         Assert.Equal(expected, Video2XProcessor.FormatProgressLog(line));
 
 
+    /// <summary>Разрешает редактирование только до запуска или перед повтором.</summary>
+    [Theory]
+    [InlineData("Ожидает", true)]
+    [InlineData("Ошибка", true)]
+    [InlineData("Отменено", true)]
+    [InlineData("Прервано", true)]
+    [InlineData("Обработка", false)]
+    [InlineData("Готово", false)]
+    [InlineData("С предупреждением", false)]
+    public void ChecksJobSettingsAvailability(string status, bool expected)
+    {
+        var job = NewJob("input.mkv");
+        var changed = new List<string?>();
+        job.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        job.Status = status;
+
+        Assert.Equal(expected, job.CanEditSettings);
+        Assert.Contains(nameof(QueueJob.CanEditSettings), changed);
+    }
+
+    /// <summary>Обновляет строку очереди и передаёт сохранённые параметры обработчику.</summary>
+    [Fact]
+    public async Task RunsWithEditedJobSettings()
+    {
+        var job = NewJob("input.mkv");
+        var other = NewJob("other.mkv");
+        var original = job.Request;
+        var unchanged = other.Request;
+        var edited = original with
+        {
+            Profile = ProcessingProfile.All[4], TargetWidth = 2560, TargetHeight = 1440,
+            EncodingCrf = 20, Start = 5, Duration = 30, KeepTemporaryFiles = false
+        };
+        var changed = new List<string?>();
+        job.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        job.Request = edited;
+
+        Assert.Equal("2560×1440", job.Target);
+        Assert.Equal("CRF 20", job.EncodingQuality);
+        Assert.Equal("5–35 с", job.Range);
+        Assert.Equal(edited.Profile.Name, job.Profile);
+        Assert.Contains(nameof(QueueJob.Target), changed);
+        Assert.Contains(nameof(QueueJob.EncodingQuality), changed);
+        Assert.Contains(nameof(QueueJob.Range), changed);
+        Assert.Contains(nameof(QueueJob.Profile), changed);
+
+        var store = new WorkspaceStore(Path.Combine(directory, "state"));
+        store.Save(new WorkspaceState { Jobs = [job, other] });
+        var loaded = store.Load();
+        Assert.Equal(job.Id, loaded.Jobs[0].Id);
+        Assert.Equal(original.Input, loaded.Jobs[0].Request.Input);
+        Assert.Equal(edited, loaded.Jobs[0].Request);
+        Assert.Equal(unchanged, loaded.Jobs[1].Request);
+
+        await File.WriteAllTextAsync(Path.Combine(directory, "report.json"), """{"Status":"Completed"}""");
+        var handled = new List<ProcessingRequest>();
+        var queue = new ProcessingQueue(new StubProcessor((request, _, _, _) =>
+        {
+            handled.Add(request);
+            return Task.FromResult(directory);
+        }), (_, _, _, _) => Task.CompletedTask);
+        await queue.RunAsync(loaded.Jobs, () => { }, _ => { }, _ => { }, (_, _) => { }, CancellationToken.None);
+        Assert.Equal([edited, unchanged], handled);
+    }
+
+    /// <summary>Показывает CRF стандартных и ранее сохранённых настроек.</summary>
+    [Theory]
+    [InlineData(16, "CRF 16")]
+    [InlineData(20, "CRF 20")]
+    [InlineData(22, "CRF 22")]
+    [InlineData(18, "CRF 18")]
+    public void DisplaysJobEncodingQuality(int crf, string expected)
+    {
+        var job = NewJob("input.mkv");
+        job.Request = job.Request with { EncodingCrf = crf };
+
+        Assert.Equal(expected, job.EncodingQuality);
+    }
+
     /// <summary>Сохраняет путь к рабочей папке после отмены.</summary>
     [Fact]
     public async Task PersistsCancelledResultPath()

@@ -18,10 +18,6 @@ public partial class MainWindow : Window
     private CancellationTokenSource? cancellation;
     private bool ready, closeAfterStop;
 
-    /// <summary>Возвращает CRF выбранного профиля кодирования.</summary>
-    private int SelectedEncodingCrf => EncodingBox.SelectedItem is ComboBoxItem { Tag: string value }
-        ? int.Parse(value, System.Globalization.CultureInfo.InvariantCulture) : 22;
-
     private readonly WorkspaceStore store;
     private readonly string toolsDirectory = Path.Combine(FindRoot(), "tools");
     private WorkspaceState state;
@@ -43,12 +39,10 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(LibraryPath.Text)) try
             { using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "animelib-desktop", "offline-settings.json"))); LibraryPath.Text = config.RootElement.GetProperty("downloadsPath").GetString(); }
             catch (Exception ex) when (ex is IOException or JsonException) { }
-        ProfileBox.ItemsSource = ProcessingProfile.MenuOrder;
-        ProfileBox.SelectedItem = ProcessingProfile.All[Math.Clamp(settings.ProfileIndex, 0, ProcessingProfile.All.Length - 1)];
-        ResolutionBox.SelectedIndex = (settings.Width, settings.Height) switch { (1920, 1080) => 0, (2560, 1440) => 1, (3840, 2160) => 2, _ => 3 };
-        TargetWidthBox.Text = settings.Width.ToString(); TargetHeightBox.Text = settings.Height.ToString();
-        EncodingBox.SelectedIndex = settings.EncodingCrf switch { 20 => 1, 16 => 2, _ => 0 };
-        FullVideoBox.IsChecked = settings.FullVideo; KeepTemporaryBox.IsChecked = settings.KeepTemporary; RangePanel.IsEnabled = !settings.FullVideo;
+        var defaultProfile = ProcessingProfile.All[Math.Clamp(settings.ProfileIndex, 0, ProcessingProfile.All.Length - 1)];
+        var encodingCrf = settings.EncodingCrf is 16 or 20 ? settings.EncodingCrf : 22;
+        NewJobSettings.LoadValues(defaultProfile, settings.Width, settings.Height, encodingCrf,
+            settings.FullVideo, settings.KeepTemporary);
         ready = true; Log("Очередь: " + store.DirectoryPath + ". Прерванные задания повторяются с начала вручную.");
     }
     /// <summary>Находит корневую папку решения.</summary>
@@ -74,21 +68,21 @@ public partial class MainWindow : Window
             FFmpeg = state.Settings.FFmpeg,
             FFprobe = state.Settings.FFprobe,
             LibraryPath = LibraryPath.Text,
-            ProfileIndex = Array.IndexOf(ProcessingProfile.All, (ProcessingProfile)ProfileBox.SelectedItem),
-            Width = int.TryParse(TargetWidthBox.Text, out var w) ? w : 1920,
-            Height = int.TryParse(TargetHeightBox.Text, out var h) ? h : 1080,
-            FullVideo = FullVideoBox.IsChecked == true,
-            EncodingCrf = SelectedEncodingCrf,
-            KeepTemporary = KeepTemporaryBox.IsChecked == true
+            ProfileIndex = Array.IndexOf(ProcessingProfile.All, NewJobSettings.Profile),
+            Width = int.TryParse(NewJobSettings.WidthText, out var w) ? w : 1920,
+            Height = int.TryParse(NewJobSettings.HeightText, out var h) ? h : 1080,
+            FullVideo = NewJobSettings.FullVideo,
+            EncodingCrf = NewJobSettings.EncodingCrf,
+            KeepTemporary = NewJobSettings.KeepTemporaryFiles
         };
         state.Jobs = Jobs.ToList(); store.Save(state);
     }
     /// <summary>Собирает параметры нового задания.</summary>
     private ProcessingRequest Request(string input, LibraryVideo? library = null)
     {
-        var (w, h) = ProcessingInput.ReadSize(TargetWidthBox.Text, TargetHeightBox.Text);
-        var full = library != null || FullVideoBox.IsChecked == true;
-        var (start, duration) = ProcessingInput.ReadRange(full, StartSeconds.Text, DurationSeconds.Text);
+        var (w, h) = NewJobSettings.ReadSize();
+        var full = library != null || NewJobSettings.FullVideo;
+        var (start, duration) = NewJobSettings.ReadRange(full);
         var settings = state.Settings;
         var video2x = Discover(settings.Video2X, toolsDirectory, "video2x.exe");
         var ffmpeg = Discover(settings.FFmpeg, toolsDirectory, "ffmpeg.exe");
@@ -98,7 +92,7 @@ public partial class MainWindow : Window
         if (missing.Length > 0)
             throw new FileNotFoundException($"Не найдены файлы «{string.Join(", ", missing)}». Распакуйте инструменты в папку {toolsDirectory}.");
 
-        return new(input, OutputPath.Text, video2x, ffmpeg, ffprobe, (ProcessingProfile)ProfileBox.SelectedItem, w, h, start, duration, full, KeepTemporaryBox.IsChecked == true, library, SelectedEncodingCrf);
+        return new(input, OutputPath.Text, video2x, ffmpeg, ffprobe, NewJobSettings.Profile, w, h, start, duration, full, NewJobSettings.KeepTemporaryFiles, library, NewJobSettings.EncodingCrf);
     }
     /// <summary>Добавляет выбранные файлы в очередь.</summary>
     private async void AddFiles(object sender, RoutedEventArgs e)
@@ -247,6 +241,29 @@ public partial class MainWindow : Window
         QueueMetricsText.Text = $"Выполнено: {metrics.Percent:0.##} %   ·   Прошло: {QueueRunProgress.FormatDuration(elapsed)}   ·   Осталось: {remaining}";
     }
 
+    /// <summary>Открывает параметры выбранного задания.</summary>
+    private void EditJob(object sender, RoutedEventArgs e)
+    {
+        if (JobsGrid.SelectedItems.Count != 1 || JobsGrid.SelectedItem is not QueueJob { CanEditSettings: true } job)
+            return;
+
+        var dialog = new JobSettingsWindow(job, request =>
+        {
+            if (!job.CanEditSettings)
+                throw new InvalidOperationException("Задание уже запущено. Закройте окно параметров.");
+
+            var previous = job.Request;
+            job.Request = request;
+            try { Save(); }
+            catch
+            {
+                job.Request = previous;
+                throw;
+            }
+        }) { Owner = this };
+        dialog.ShowDialog();
+    }
+
     /// <summary>Возвращает выбранные незавершённые задания в очередь.</summary>
     private void Retry(object sender, RoutedEventArgs e)
     {
@@ -298,8 +315,10 @@ public partial class MainWindow : Window
     /// <summary>Показывает журнал выбранного задания.</summary>
     private void JobSelected(object sender, SelectionChangedEventArgs e)
     {
-        if (!ready || cancellation != null || JobsGrid.SelectedItems.Count != 1 ||
-            JobsGrid.SelectedItem is not QueueJob job) return;
+        if (!ready) return;
+        var job = JobsGrid.SelectedItems.Count == 1 ? JobsGrid.SelectedItem as QueueJob : null;
+        EditJobButton.DataContext = job;
+        if (cancellation != null || job == null) return;
         LogBox.Text = job.Error;
         if (string.IsNullOrEmpty(job.ResultPath)) return;
         var file = Path.Combine(job.ResultPath, "processing.log");
@@ -309,10 +328,6 @@ public partial class MainWindow : Window
     private void ChooseOutput(object s, RoutedEventArgs e) { var d = new OpenFolderDialog(); if (d.ShowDialog() == true) OutputPath.Text = d.FolderName; }
     /// <summary>Выбирает папку библиотеки.</summary>
     private void ChooseLibrary(object s, RoutedEventArgs e) { var d = new OpenFolderDialog(); if (d.ShowDialog() == true) LibraryPath.Text = d.FolderName; }
-    /// <summary>Применяет выбранный размер кадра.</summary>
-    private void ResolutionChanged(object s, SelectionChangedEventArgs e) { if (TargetWidthBox == null || TargetHeightBox == null || ResolutionBox.SelectedItem is not ComboBoxItem item) return; var tag = item.Tag.ToString()!; TargetWidthBox.IsEnabled = TargetHeightBox.IsEnabled = tag == "custom"; if (tag != "custom") { var sizes = tag.Split(','); TargetWidthBox.Text = sizes[0]; TargetHeightBox.Text = sizes[1]; } }
-    /// <summary>Переключает поля диапазона.</summary>
-    private void RangeChanged(object s, RoutedEventArgs e) { if (RangePanel != null) RangePanel.IsEnabled = FullVideoBox.IsChecked != true; }
     /// <summary>Запрашивает остановку очереди.</summary>
     private void Cancel(object s, RoutedEventArgs e) { cancellation?.Cancel(); CancelButton.IsEnabled = false; }
     /// <summary>Добавляет строку в журнал окна.</summary>
