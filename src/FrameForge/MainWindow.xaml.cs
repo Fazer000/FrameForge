@@ -21,6 +21,7 @@ public partial class MainWindow : Window
         ? int.Parse(value, System.Globalization.CultureInfo.InvariantCulture) : 22;
 
     private readonly WorkspaceStore store;
+    private readonly string toolsDirectory = Path.Combine(FindRoot(), "tools");
     private WorkspaceState state;
     private readonly ProcessingQueue queue = new(new Video2XProcessor(), LibraryIntegration.PublishAsync);
     /// <summary>Отображает настройки и очередь обработки.</summary>
@@ -32,11 +33,8 @@ public partial class MainWindow : Window
         catch (Exception ex) { MessageBox.Show(ex.Message); state = new(); Application.Current.Shutdown(); return; }
         foreach (var job in state.Jobs) Jobs.Add(job);
         DataContext = this;
-        var settings = state.Settings; var tools = Path.Combine(FindRoot(), "tools");
+        var settings = state.Settings;
         OutputPath.Text = settings.OutputPath;
-        Video2XPath.Text = Discover(settings.Video2X, tools, "video2x.exe");
-        FFmpegPath.Text = Discover(settings.FFmpeg, tools, "ffmpeg.exe");
-        FFprobePath.Text = Discover(settings.FFprobe, tools, "ffprobe.exe");
         LibraryPath.Text = settings.LibraryPath;
         if (string.IsNullOrEmpty(LibraryPath.Text)) try
             { using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "animelib-desktop", "offline-settings.json"))); LibraryPath.Text = config.RootElement.GetProperty("downloadsPath").GetString(); }
@@ -53,17 +51,15 @@ public partial class MainWindow : Window
     private static string FindRoot() { for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent) if (File.Exists(Path.Combine(d.FullName, "frame-forge.sln"))) return d.FullName; return AppContext.BaseDirectory; }
     /// <summary>Находит исполняемый файл инструмента.</summary>
     private static string Discover(string current, string root, string name) => File.Exists(current) ? current : Directory.Exists(root) ? Directory.EnumerateFiles(root, name, SearchOption.AllDirectories).FirstOrDefault() ?? "" : "";
-    /// <summary>Открывает диалог выбора файла.</summary>
-    private static string? Pick(string filter) { var d = new OpenFileDialog { Filter = filter }; return d.ShowDialog() == true ? d.FileName : null; }
     /// <summary>Сохраняет настройки и задания окна.</summary>
     private void Save()
     {
         state.Settings = new()
         {
             OutputPath = OutputPath.Text,
-            Video2X = Video2XPath.Text,
-            FFmpeg = FFmpegPath.Text,
-            FFprobe = FFprobePath.Text,
+            Video2X = state.Settings.Video2X,
+            FFmpeg = state.Settings.FFmpeg,
+            FFprobe = state.Settings.FFprobe,
             LibraryPath = LibraryPath.Text,
             ProfileIndex = ProfileBox.SelectedIndex,
             Width = int.TryParse(TargetWidthBox.Text, out var w) ? w : 1920,
@@ -81,8 +77,16 @@ public partial class MainWindow : Window
         var full = FullVideoBox.IsChecked == true;
         var (start, duration) = ProcessingInput.ReadRange(full, StartSeconds.Text, DurationSeconds.Text);
         if (library != null && !full) throw new ArgumentException("Для замены серии выберите обработку видео целиком.");
-        foreach (var tool in new[] { Video2XPath.Text, FFmpegPath.Text, FFprobePath.Text }) if (!File.Exists(tool)) throw new FileNotFoundException("Выберите инструменты в настройках.", tool);
-        return new(input, OutputPath.Text, Video2XPath.Text, FFmpegPath.Text, FFprobePath.Text, (ProcessingProfile)ProfileBox.SelectedItem, w, h, start, duration, full, KeepTemporaryBox.IsChecked == true, library, SelectedEncodingCrf);
+        var settings = state.Settings;
+        var video2x = Discover(settings.Video2X, toolsDirectory, "video2x.exe");
+        var ffmpeg = Discover(settings.FFmpeg, toolsDirectory, "ffmpeg.exe");
+        var ffprobe = Discover(settings.FFprobe, toolsDirectory, "ffprobe.exe");
+        (string Name, string Path)[] tools = [("video2x.exe", video2x), ("ffmpeg.exe", ffmpeg), ("ffprobe.exe", ffprobe)];
+        var missing = tools.Where(tool => !File.Exists(tool.Path)).Select(tool => tool.Name).ToArray();
+        if (missing.Length > 0)
+            throw new FileNotFoundException($"Не найдены файлы «{string.Join(", ", missing)}». Распакуйте инструменты в папку {toolsDirectory}.");
+
+        return new(input, OutputPath.Text, video2x, ffmpeg, ffprobe, (ProcessingProfile)ProfileBox.SelectedItem, w, h, start, duration, full, KeepTemporaryBox.IsChecked == true, library, SelectedEncodingCrf);
     }
     /// <summary>Добавляет выбранные файлы в очередь.</summary>
     private void AddFiles(object sender, RoutedEventArgs e)
@@ -97,7 +101,8 @@ public partial class MainWindow : Window
         trigger.IsEnabled = false;
         try
         {
-            var videos = await LibraryIntegration.ReadCatalogAsync(LibraryPath.Text, FFprobePath.Text);
+            var ffprobe = Discover(state.Settings.FFprobe, toolsDirectory, "ffprobe.exe");
+            var videos = await LibraryIntegration.ReadCatalogAsync(LibraryPath.Text, ffprobe);
             var list = new ListBox { ItemsSource = videos, SelectionMode = SelectionMode.Extended, Margin = new Thickness(12) };
             var button = new Button { Content = "Добавить выбранные", Margin = new Thickness(12) }; var panel = new DockPanel(); DockPanel.SetDock(button, Dock.Bottom); panel.Children.Add(button); panel.Children.Add(list);
             var dialog = new Window { Title = "Серии AnimeLib", Owner = this, Icon = Icon, Width = 850, Height = 550, Content = panel, WindowStartupLocation = WindowStartupLocation.CenterOwner };
@@ -177,12 +182,6 @@ public partial class MainWindow : Window
     private void ChooseOutput(object s, RoutedEventArgs e) { var d = new OpenFolderDialog(); if (d.ShowDialog() == true) OutputPath.Text = d.FolderName; }
     /// <summary>Выбирает папку библиотеки.</summary>
     private void ChooseLibrary(object s, RoutedEventArgs e) { var d = new OpenFolderDialog(); if (d.ShowDialog() == true) LibraryPath.Text = d.FolderName; }
-    /// <summary>Выбирает исполняемый файл Video2X.</summary>
-    private void ChooseVideo2X(object s, RoutedEventArgs e) { if (Pick("Video2X|video2x.exe") is { } p) Video2XPath.Text = p; }
-    /// <summary>Выбирает исполняемый файл FFmpeg.</summary>
-    private void ChooseFFmpeg(object s, RoutedEventArgs e) { if (Pick("FFmpeg|ffmpeg.exe") is { } p) FFmpegPath.Text = p; }
-    /// <summary>Выбирает исполняемый файл ffprobe.</summary>
-    private void ChooseFFprobe(object s, RoutedEventArgs e) { if (Pick("ffprobe|ffprobe.exe") is { } p) FFprobePath.Text = p; }
     /// <summary>Применяет выбранный размер кадра.</summary>
     private void ResolutionChanged(object s, SelectionChangedEventArgs e) { if (TargetWidthBox == null || TargetHeightBox == null || ResolutionBox.SelectedItem is not ComboBoxItem item) return; var tag = item.Tag.ToString()!; TargetWidthBox.IsEnabled = TargetHeightBox.IsEnabled = tag == "custom"; if (tag != "custom") { var sizes = tag.Split(','); TargetWidthBox.Text = sizes[0]; TargetHeightBox.Text = sizes[1]; } }
     /// <summary>Переключает поля диапазона.</summary>

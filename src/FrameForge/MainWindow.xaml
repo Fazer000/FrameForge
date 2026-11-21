@@ -21,7 +21,6 @@
     <CheckBox x:Name="KeepTemporaryBox" Content="Сохранять временные файлы" Foreground="#E4E9F3"/>
     <TextBlock Text="При уменьшении результата используется промежуточное видео без потерь. Для длинных файлов нужно много свободного места." TextWrapping="Wrap" Foreground="#97ABC8" Margin="0,6,0,14"/>
     <TextBlock Text="Папка результатов" Margin="0,0,0,6"/><TextBox x:Name="OutputPath" IsReadOnly="True"/><Button Content="Выбрать папку…" Click="ChooseOutput" Margin="0,6,0,14"/>
-    <Expander Header="Инструменты" Foreground="#A8BFE2" Margin="0,0,0,14"><StackPanel Margin="0,8,0,0"><TextBox x:Name="Video2XPath"/><Button Content="Video2X…" Click="ChooseVideo2X" Margin="0,4,0,8"/><TextBox x:Name="FFmpegPath"/><Button Content="FFmpeg…" Click="ChooseFFmpeg" Margin="0,4,0,8"/><TextBox x:Name="FFprobePath"/><Button Content="ffprobe…" Click="ChooseFFprobe" Margin="0,4,0,0"/></StackPanel></Expander>
     <Expander Header="Библиотека AnimeLib" Foreground="#A8BFE2"><StackPanel Margin="0,8,0,0"><TextBox x:Name="LibraryPath"/><Button Content="Выбрать библиотеку…" Click="ChooseLibrary" Margin="0,6,0,6"/><TextBlock Text="После проверки улучшенный файл заменяет серию; временный оригинал удаляется. Закройте AnimeLib перед заменой." Foreground="#97ABC8" TextWrapping="Wrap"/></StackPanel></Expander>
    </StackPanel></ScrollViewer>
    <Grid Grid.Column="2"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
