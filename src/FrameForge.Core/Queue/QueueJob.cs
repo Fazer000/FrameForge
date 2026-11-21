@@ -16,6 +16,7 @@ public sealed class QueueJob : INotifyPropertyChanged
     public double Progress { get => progress; set { progress = value; Changed(); } }
     private string resultPath = "";
     public string ResultPath { get => resultPath; set { resultPath = value; Changed(); } }
+    public List<string> CancelledResultPaths { get; init; } = [];
     public string Error { get; set; } = "";
     public string Name => Path.GetFileName(Request.Input);
     public string Profile => Request.Profile.Name;

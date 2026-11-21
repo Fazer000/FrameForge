@@ -3,9 +3,11 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Microsoft.Win32;
 namespace FrameForge;
 
@@ -28,6 +30,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        var version = typeof(MainWindow).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        VersionText.Text = version?.Split('+', 2)[0] ?? "";
         store = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FrameForge"));
         try { state = store.Load(); }
         catch (Exception ex) { MessageBox.Show(ex.Message); state = new(); Application.Current.Shutdown(); return; }
@@ -128,33 +132,77 @@ public partial class MainWindow : Window
     private async void Run(object sender, RoutedEventArgs e)
     {
         if (cancellation != null) return;
-        cancellation = new(); RunButton.IsEnabled = false; CancelButton.IsEnabled = true;
+        if (!Jobs.Any(job => job.Status == "Ожидает"))
+        {
+            StatusText.Text = "Нет ожидающих заданий";
+            return;
+        }
+
+        cancellation = new();
+        RunButton.IsEnabled = false;
+        CancelButton.IsEnabled = true;
+        var started = new HashSet<QueueJob>();
+        var clock = Stopwatch.StartNew();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        timer.Tick += (_, _) => ShowQueueMetrics(started, clock.Elapsed, estimate: !cancellation.IsCancellationRequested);
+        ShowQueueMetrics(started, clock.Elapsed, estimate: true);
+        timer.Start();
+        var finished = false;
         try
         {
             Save();
             await queue.RunAsync(Jobs, Save, job =>
             {
+                started.Add(job);
                 JobsGrid.SelectedItem = job;
                 LogBox.Clear();
                 StatusText.Text = job.Name;
-                Progress.IsIndeterminate = true;
             }, Log, (job, value) => Dispatcher.InvokeAsync(() =>
             {
-                job.Progress = value;
-                Progress.IsIndeterminate = false;
-                Progress.Value = value;
+                if (job.Status == "Обработка") job.Progress = Math.Min(value, 99);
             }), cancellation.Token);
-            StatusText.Text = cancellation.IsCancellationRequested ? "Очередь остановлена. Ожидающие задания сохранены." : "Очередь завершена";
+            finished = !cancellation.IsCancellationRequested;
+            StatusText.Text = finished ? "Очередь завершена" : "Очередь остановлена. Ожидающие задания сохранены.";
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Очередь остановлена"); }
-        finally { cancellation.Dispose(); cancellation = null; RunButton.IsEnabled = true; CancelButton.IsEnabled = false; Progress.IsIndeterminate = false; if (closeAfterStop) Close(); }
+        finally
+        {
+            timer.Stop();
+            clock.Stop();
+            ShowQueueMetrics(started, clock.Elapsed, estimate: finished);
+            cancellation.Dispose();
+            cancellation = null;
+            RunButton.IsEnabled = true;
+            CancelButton.IsEnabled = false;
+            if (closeAfterStop) Close();
+        }
     }
+
+    /// <summary>Обновляет показатели текущего запуска очереди.</summary>
+    private void ShowQueueMetrics(IEnumerable<QueueJob> started, TimeSpan elapsed, bool estimate)
+    {
+        var metrics = QueueRunProgress.Calculate(started, Jobs, elapsed);
+        Progress.Value = metrics.Percent;
+        var remaining = estimate && metrics.Remaining is { } time ? QueueRunProgress.FormatDuration(time) : "—";
+        QueueMetricsText.Text = $"Выполнено: {metrics.Percent:0.##} %   ·   Прошло: {QueueRunProgress.FormatDuration(elapsed)}   ·   Осталось: {remaining}";
+    }
+
+    /// <summary>Форматирует длительность без сброса часов после суток.</summary>
+    private static string FormatDuration(TimeSpan duration) =>
+        $"{(long)duration.TotalHours:00}:{duration.Minutes:00}:{duration.Seconds:00}";
     /// <summary>Возвращает прерванное задание в очередь.</summary>
     private void Retry(object sender, RoutedEventArgs e) { if (JobsGrid.SelectedItem is QueueJob job && job.Status is "Ошибка" or "Отменено" or "Прервано") { job.Status = "Ожидает"; job.Progress = 0; TrySave(); } }
     /// <summary>Убирает выбранное задание из списка.</summary>
     private void Remove(object sender, RoutedEventArgs e)
     {
         if (JobsGrid.SelectedItem is not QueueJob job || job.Status == "Обработка") return;
+        try { CancelledJobCleanup.DeleteArtifacts(job); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            MessageBox.Show("Не удалось удалить файлы отменённой задачи: " + ex.Message);
+            return;
+        }
+
         var index = Jobs.IndexOf(job);
         Jobs.RemoveAt(index);
         try { Save(); }

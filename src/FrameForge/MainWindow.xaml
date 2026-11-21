@@ -2,7 +2,10 @@
 <Window x:Class="FrameForge.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Frame Forge" Icon="/Assets/FrameForge.ico" Width="1240" Height="900" MinWidth="1050" MinHeight="760" Background="#101827" FontFamily="Segoe UI" FontSize="14" Closing="OnClosing">
  <Grid Margin="24" TextElement.Foreground="#E4E9F3">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-  <TextBlock Text="FRAME FORGE" FontSize="28" FontWeight="SemiBold" Margin="0,0,0,18"/>
+  <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+   <TextBlock Text="FRAME FORGE" FontSize="28" FontWeight="SemiBold"/>
+   <TextBlock x:Name="VersionText" Foreground="#97ABC8" VerticalAlignment="Bottom" Margin="10,0,0,4"/>
+  </StackPanel>
   <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition Width="360"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
    <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="SettingsPanel" Margin="0,0,10,0">
     <TextBlock Text="Параметры новых заданий" FontSize="18" Margin="0,0,0,14"/>
@@ -12,7 +15,7 @@
     <CheckBox x:Name="FullVideoBox" Content="Обрабатывать видео целиком" IsChecked="True" Foreground="#E4E9F3" Checked="RangeChanged" Unchecked="RangeChanged"/>
     <StackPanel x:Name="RangePanel" Orientation="Horizontal" Margin="0,8,0,12"><StackPanel><TextBlock Text="Начало, сек."/><TextBox x:Name="StartSeconds" Text="60" Width="120"/></StackPanel><StackPanel Margin="10,0,0,0"><TextBlock Text="Длина, сек."/><TextBox x:Name="DurationSeconds" Text="10" Width="120"/></StackPanel></StackPanel>
     <TextBlock Text="Качество кодирования H.264" Margin="0,10,0,6"/>
-    <ComboBox x:Name="EncodingBox" Margin="0,0,0,12">
+    <ComboBox x:Name="EncodingBox" Margin="0,0,0,12" ToolTip="CRF определяет качество итогового видео H.264. Меньше CRF — выше качество и обычно больше размер файла.">
      <ComboBoxItem Tag="22" Content="Компактное (CRF 22)"/>
      <ComboBoxItem Tag="20" Content="Сбалансированное (CRF 20)"/>
      <ComboBoxItem Tag="16" Content="Высокое (CRF 16)"/>
@@ -26,7 +29,9 @@
     <DataGrid x:Name="JobsGrid" Grid.Row="1" ItemsSource="{Binding Jobs}" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" CanUserAddRows="False" Background="#1F2A3E" Foreground="#132039" RowBackground="#E5ECF6" AlternatingRowBackground="#CEDBED" GridLinesVisibility="None" SelectionChanged="JobSelected"><DataGrid.Columns><DataGridTextColumn Header="Файл" Binding="{Binding Name}" Width="*"/><DataGridTextColumn Header="Размер" Binding="{Binding Target}" Width="100"/><DataGridTextColumn Header="Диапазон" Binding="{Binding Range}" Width="100"/><DataGridTextColumn Header="Состояние" Binding="{Binding Status}" Width="140"/><DataGridTextColumn Header="%" Binding="{Binding Progress, StringFormat=F0}" Width="45"/></DataGrid.Columns></DataGrid>
     <WrapPanel Grid.Row="2" Margin="0,10,0,10"><Button Content="Повторить" Click="Retry"/><Button Content="Убрать" Click="Remove"/><Button Content="Результат" Click="OpenResults"/></WrapPanel>
     <TextBox Grid.Row="3" x:Name="LogBox" IsReadOnly="True" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,12,0,12"/>
-    <StackPanel Grid.Row="4"><TextBlock x:Name="StatusText" Text="Готов к работе" Margin="0,0,0,8"/><ProgressBar x:Name="Progress" Height="5" Minimum="0" Maximum="100" Margin="0,0,0,12"/><StackPanel Orientation="Horizontal"><Button x:Name="RunButton" Content="Запустить очередь" Click="Run"/><Button x:Name="CancelButton" Content="Остановить очередь" IsEnabled="False" Click="Cancel"/></StackPanel></StackPanel>
+    <StackPanel Grid.Row="4"><TextBlock x:Name="StatusText" Text="Готов к работе" Margin="0,0,0,8"/>
+     <TextBlock x:Name="QueueMetricsText" Text="Выполнено: 0 %   ·   Прошло: 00:00:00   ·   Осталось: —" Foreground="#97ABC8" TextWrapping="Wrap" Margin="0,0,0,8"/>
+     <ProgressBar x:Name="Progress" Height="5" Minimum="0" Maximum="100" Margin="0,0,0,12"/><StackPanel Orientation="Horizontal"><Button x:Name="RunButton" Content="Запустить очередь" Click="Run"/><Button x:Name="CancelButton" Content="Остановить очередь" IsEnabled="False" Click="Cancel"/></StackPanel></StackPanel>
    </Grid>
   </Grid>
  </Grid>

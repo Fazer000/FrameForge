@@ -11,5 +11,5 @@ public interface IVideoProcessor
 {
     /// <summary>Выполняет обработку и возвращает папку результата.</summary>
     Task<string> ProcessAsync(ProcessingRequest request, Action<string> log,
-        Action<double> progress, CancellationToken token);
+        Action<double> progress, CancellationToken token, Action<string>? resultDirectoryCreated = null);
 }

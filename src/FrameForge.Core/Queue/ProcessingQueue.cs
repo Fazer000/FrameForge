@@ -16,13 +16,18 @@ public sealed class ProcessingQueue(
             job.Status = "Обработка";
             job.Progress = 0;
             job.Error = "";
+            job.ResultPath = "";
             save();
             started(job);
 
             try
             {
                 job.ResultPath = await processor.ProcessAsync(job.Request, log,
-                    value => progress(job, value), token);
+                    value => progress(job, value), token, directory =>
+                    {
+                        job.ResultPath = directory;
+                        save();
+                    });
                 if (job.Request.Library != null)
                     await publish(job.Request, job.ResultPath, log, token);
 
@@ -34,6 +39,8 @@ public sealed class ProcessingQueue(
             }
             catch (OperationCanceledException)
             {
+                if (job.ResultPath.Length > 0)
+                    job.CancelledResultPaths.Add(job.ResultPath);
                 job.Status = "Отменено";
                 job.Error = "Отменено пользователем";
             }

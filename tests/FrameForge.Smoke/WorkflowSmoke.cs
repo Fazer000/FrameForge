@@ -46,7 +46,14 @@ public static class WorkflowSmoke
         Console.WriteLine("PASS queue roundtrip, interrupted recovery and corrupt-primary backup");
         var video = new LibraryVideo(directory, "episode.mkv", "Test episode", hash);
         var publishRequest = firstRequest with { Library = video };
+        var stagedResult = Path.Combine(firstResult!, "enhanced.mkv");
+        var recoveryDirectory = Directory.CreateDirectory(Path.Combine(directory, "recovery")).FullName;
+        var recoveryResult = Path.Combine(recoveryDirectory, "enhanced.mkv");
+        File.Copy(stagedResult, recoveryResult);
         await LibraryIntegration.PublishAsync(publishRequest, firstResult!, Console.WriteLine, CancellationToken.None);
+        if (File.Exists(stagedResult)) throw new Exception("Staged result retained after successful publication");
+        if (!File.Exists(Path.Combine(firstResult!, "processing.log")) || !File.Exists(Path.Combine(firstResult!, "report.json")))
+            throw new Exception("Job diagnostics lost after cleanup");
         if (File.Exists(video.BackupPath) || LibraryIntegration.Hash(source) == hash) throw new Exception("Temporary original not removed");
         var completedMarker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(video.MarkerPath));
         if (completedMarker?.State != "Enhanced" || completedMarker.EnhancedHash != LibraryIntegration.Hash(source)) throw new Exception("Published hash mismatch");
@@ -70,7 +77,7 @@ public static class WorkflowSmoke
         FileStream? lockedBackup = null;
         try
         {
-            await LibraryIntegration.PublishAsync(publishRequest with { Library = failedVideo }, firstResult!, line =>
+            await LibraryIntegration.PublishAsync(publishRequest with { Library = failedVideo }, recoveryDirectory, line =>
             {
                 if (line.StartsWith("Проверка записанного", StringComparison.Ordinal))
                     lockedBackup = new FileStream(failedVideo.BackupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -79,6 +86,7 @@ public static class WorkflowSmoke
         }
         catch (IOException) { if (LibraryIntegration.Hash(failedVideo.BackupPath) != hash) throw new Exception("Original lost on failure"); }
         finally { lockedBackup?.Dispose(); }
+        if (!File.Exists(recoveryResult)) throw new Exception("Staged result lost after failed publication");
         var savedEnhanced = File.ReadAllBytes(failedVideo.SourcePath); File.AppendAllText(failedVideo.SourcePath, "changed");
         try { LibraryIntegration.Restore(failedVideo); throw new Exception("Changed source was overwritten"); } catch (IOException) { }
         File.WriteAllBytes(failedVideo.SourcePath, savedEnhanced); LibraryIntegration.Restore(failedVideo);
@@ -86,6 +94,10 @@ public static class WorkflowSmoke
         var marker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(failedVideo.MarkerPath));
         if (marker?.State != "Restored") throw new Exception("Marker state not restored");
         Console.WriteLine("PASS cleanup failure retains original; tamper refused; failure recovery preserves original SHA256");
+        await LibraryIntegration.PublishAsync(publishRequest with { Library = failedVideo, KeepTemporaryFiles = true },
+            recoveryDirectory, Console.WriteLine, CancellationToken.None);
+        if (!File.Exists(recoveryResult) || File.Exists(failedVideo.BackupPath))
+            throw new Exception("Keeping temporary files did not preserve the staged result or retained the original");
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         try
         {

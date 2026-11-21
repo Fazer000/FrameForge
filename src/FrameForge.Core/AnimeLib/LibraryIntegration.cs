@@ -94,6 +94,10 @@ public static class LibraryIntegration
         File.Move(temporary, video.MarkerPath, overwrite: true);
     }
 
+    /// <summary>Возвращает путь к временному MP4 попытки.</summary>
+    internal static string GetPendingPath(LibraryVideo video, string resultDirectory) =>
+        video.SourcePath + $".frameforge-pending-{Path.GetFileName(Path.TrimEndingDirectorySeparator(resultDirectory))}.mp4";
+
     /// <summary>Проверяет и публикует улучшенную серию.</summary>
     public static async Task PublishAsync(ProcessingRequest request, string resultDirectory, Action<string> log, CancellationToken token)
     {
@@ -101,10 +105,13 @@ public static class LibraryIntegration
         if (!request.FullVideo) throw new InvalidOperationException("В библиотеку можно записывать только полное видео.");
         if (File.Exists(video.BackupPath)) throw new InvalidOperationException("Осталась временная копия от предыдущей операции. Проверьте её перед повторной заменой.");
         if (Hash(video.SourcePath) != video.OriginalHash) throw new InvalidOperationException("Исходник библиотеки изменился после добавления задания. Замена отменена.");
-        var temporary = video.SourcePath + $".frameforge-pending-{Guid.NewGuid():N}.mp4";
+        var temporary = GetPendingPath(video, resultDirectory);
+        var stagedResult = Path.GetFullPath(Path.Combine(resultDirectory, "enhanced.mkv"));
+        if (string.Equals(stagedResult, Path.GetFullPath(video.SourcePath), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Рабочий файл совпадает с файлом серии.");
         log("Подготовка совместимого с AnimeLib MP4. Оригинал ещё не изменён.");
         await ProcessRunner.RunAsync(request.FFmpeg,
-            ["-nostdin", "-n", "-v", "warning", "-i", Path.Combine(resultDirectory, "enhanced.mkv"),
+            ["-nostdin", "-n", "-v", "warning", "-i", stagedResult,
              "-map", "0:v:0", "-map", "0:a?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", temporary], log, token);
         await ProcessRunner.RunAsync(request.FFmpeg,
             ["-nostdin", "-v", "error", "-xerror", "-i", temporary, "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"], log, token);
@@ -131,6 +138,13 @@ public static class LibraryIntegration
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         { throw new IOException("Серия улучшена, но временный оригинал не удалось удалить: " + video.BackupPath, ex); }
         log("Серия заменена и проверена. Временный оригинал удалён.");
+
+        if (request.KeepTemporaryFiles) return;
+        try { File.Delete(stagedResult); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            log($"Не удалось удалить рабочий файл {stagedResult}: {ex.Message}");
+        }
     }
 
     /// <summary>Восстанавливает оригинал после сбоя замены.</summary>

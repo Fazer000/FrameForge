@@ -28,9 +28,19 @@ public sealed class Video2XProcessor : IVideoProcessor
         return lossless ? common : [.. common, "-e", $"crf={crf.ToString(CultureInfo.InvariantCulture)}", "-e", "preset=medium"];
     }
 
+    /// <summary>Убирает время из строки прогресса Video2X.</summary>
+    public static string FormatProgressLog(string line)
+    {
+        const string elapsedMarker = "; elapsed=";
+        var timeIndex = line.IndexOf(elapsedMarker, StringComparison.Ordinal);
+        return line.AsSpan().TrimStart().StartsWith("frame=", StringComparison.Ordinal) && timeIndex >= 0
+            ? line[..timeIndex]
+            : line;
+    }
+
     /// <summary>Выполняет обработку и возвращает папку результата.</summary>
     public async Task<string> ProcessAsync(ProcessingRequest r, Action<string> log,
-        Action<double> progress, CancellationToken token)
+        Action<double> progress, CancellationToken token, Action<string>? resultDirectoryCreated = null)
     {
         foreach (var file in new[] { r.Input, r.Video2X, r.FFmpeg, r.FFprobe })
             if (!File.Exists(file)) throw new FileNotFoundException("Файл не найден", file);
@@ -47,6 +57,7 @@ public sealed class Video2XProcessor : IVideoProcessor
         var directory = Path.Combine(Path.GetFullPath(r.OutputRoot),
             $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}");
         Directory.CreateDirectory(directory);
+        resultDirectoryCreated?.Invoke(directory);
         var clip = r.FullVideo ? r.Input : Path.Combine(directory, "reference.mkv");
         var partial = Path.Combine(directory, "enhanced.partial.mkv");
         var intermediate = plan.NeedsResize ? Path.Combine(directory, "model-output.mkv") : partial;
@@ -75,7 +86,7 @@ public sealed class Video2XProcessor : IVideoProcessor
             {
                 await ProcessRunner.RunAsync(r.Video2X, args, line =>
                 {
-                    log(line);
+                    log(FormatProgressLog(line));
                     var match = Regex.Match(line, @"(\d+(?:\.\d+)?)\s*%");
                     if (match.Success && double.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var p))
                         progress(Math.Clamp(p, 0, 100) * 0.85);
