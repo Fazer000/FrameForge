@@ -5,7 +5,7 @@ namespace FrameForge;
 public static class CancelledJobCleanup
 {
     private static readonly string[] ArtifactNames =
-        ["reference.mkv", "model-output.mkv", "enhanced.partial.mkv", "enhanced.mkv", "processing.log", "report.json"];
+        ["reference.mkv", "model-output.mkv", "enhanced.partial.mkv", "enhanced.mkv", "publish.mp4", "processing.log", "report.json"];
 
     /// <summary>Удаляет файлы отменённых попыток и пустые папки результатов.</summary>
     public static void DeleteArtifacts(QueueJob job)
@@ -17,8 +17,13 @@ public static class CancelledJobCleanup
         foreach (var path in directories.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            var parent = Path.GetDirectoryName(directory);
             var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(job.Request.OutputRoot));
-            if (!string.Equals(Path.GetDirectoryName(directory), root, StringComparison.OrdinalIgnoreCase) ||
+            var library = job.Request.Library;
+            var inOldRoot = string.Equals(parent, root, StringComparison.OrdinalIgnoreCase);
+            var inLibrary = library != null && string.Equals(parent,
+                Path.GetFullPath(library.WorkRoot), StringComparison.OrdinalIgnoreCase);
+            if ((!inOldRoot && !inLibrary) ||
                 !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(directory), @"^\d{8}-\d{6}-[0-9a-f]{8}$") ||
                 string.Equals(Path.GetDirectoryName(Path.GetFullPath(job.Request.Input)), directory, StringComparison.OrdinalIgnoreCase))
                 throw new IOException($"Не удалось подтвердить папку отменённой попытки: {directory}");
@@ -26,8 +31,8 @@ public static class CancelledJobCleanup
             if (Directory.Exists(directory) && (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
                 throw new IOException($"Папка отменённой попытки перенаправлена: {directory}");
 
-            if (job.Request.Library is { } video && Directory.Exists(video.DirectoryPath))
-                File.Delete(LibraryIntegration.GetPendingPath(video, directory));
+            if (inOldRoot && !inLibrary && library != null && Directory.Exists(library.DirectoryPath))
+                File.Delete(LibraryIntegration.GetLegacyPendingPath(library, directory));
 
             if (!Directory.Exists(directory)) continue;
 

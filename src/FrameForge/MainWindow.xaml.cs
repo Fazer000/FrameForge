@@ -54,7 +54,16 @@ public partial class MainWindow : Window
     /// <summary>Находит корневую папку решения.</summary>
     private static string FindRoot() { for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent) if (File.Exists(Path.Combine(d.FullName, "frame-forge.sln"))) return d.FullName; return AppContext.BaseDirectory; }
     /// <summary>Находит исполняемый файл инструмента.</summary>
-    private static string Discover(string current, string root, string name) => File.Exists(current) ? current : Directory.Exists(root) ? Directory.EnumerateFiles(root, name, SearchOption.AllDirectories).FirstOrDefault() ?? "" : "";
+    private static string Discover(string current, string root, string name)
+    {
+        var folder = name == "video2x.exe" ? "video2x" : "ffmpeg";
+        var bundled = Path.Combine(AppContext.BaseDirectory, "tools", folder, name);
+        if (File.Exists(bundled)) return bundled;
+        if (File.Exists(current)) return current;
+        return Directory.Exists(root)
+            ? Directory.EnumerateFiles(root, name, SearchOption.AllDirectories).FirstOrDefault() ?? ""
+            : "";
+    }
     /// <summary>Сохраняет настройки и задания окна.</summary>
     private void Save()
     {
@@ -78,9 +87,8 @@ public partial class MainWindow : Window
     private ProcessingRequest Request(string input, LibraryVideo? library = null)
     {
         var (w, h) = ProcessingInput.ReadSize(TargetWidthBox.Text, TargetHeightBox.Text);
-        var full = FullVideoBox.IsChecked == true;
+        var full = library != null || FullVideoBox.IsChecked == true;
         var (start, duration) = ProcessingInput.ReadRange(full, StartSeconds.Text, DurationSeconds.Text);
-        if (library != null && !full) throw new ArgumentException("Для замены серии выберите обработку видео целиком.");
         var settings = state.Settings;
         var video2x = Discover(settings.Video2X, toolsDirectory, "video2x.exe");
         var ffmpeg = Discover(settings.FFmpeg, toolsDirectory, "ffmpeg.exe");
@@ -93,40 +101,89 @@ public partial class MainWindow : Window
         return new(input, OutputPath.Text, video2x, ffmpeg, ffprobe, (ProcessingProfile)ProfileBox.SelectedItem, w, h, start, duration, full, KeepTemporaryBox.IsChecked == true, library, SelectedEncodingCrf);
     }
     /// <summary>Добавляет выбранные файлы в очередь.</summary>
-    private void AddFiles(object sender, RoutedEventArgs e)
+    private async void AddFiles(object sender, RoutedEventArgs e)
     {
-        var d = new OpenFileDialog { Multiselect = true, Filter = "Видео|*.mp4;*.mkv;*.avi;*.mov;*.webm;*.ts;*.m4v;*.bin|Все файлы|*.*" }; if (d.ShowDialog() != true) return;
-        try { var requests = d.FileNames.Select(f => Request(f)).ToArray(); foreach (var r in requests) Jobs.Add(new() { Request = r }); Save(); } catch (Exception ex) { MessageBox.Show(ex.Message); }
+        var dialog = new OpenFileDialog
+        {
+            Multiselect = true,
+            Filter = "Видео|*.mp4;*.mkv;*.avi;*.mov;*.webm;*.ts;*.m4v;*.bin|Все файлы|*.*"
+        };
+        if (dialog.ShowDialog(this) != true) return;
+
+        var files = dialog.FileNames;
+        try
+        {
+            await WhileLoadingAsync(() =>
+            {
+                var template = Request(files[0]);
+                Enqueue(files.Select(file => template with { Input = file }));
+                return Task.FromResult(true);
+            });
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message); }
     }
     /// <summary>Добавляет выбранные серии AnimeLib.</summary>
     private async void AddLibrary(object sender, RoutedEventArgs e)
     {
-        var trigger = (Button)sender;
-        trigger.IsEnabled = false;
         try
         {
-            var ffprobe = Discover(state.Settings.FFprobe, toolsDirectory, "ffprobe.exe");
-            var videos = await LibraryIntegration.ReadCatalogAsync(LibraryPath.Text, ffprobe);
+            var directory = LibraryPath.Text;
+            var savedProbe = state.Settings.FFprobe;
+            var videos = await WhileLoadingAsync(() => Task.Run(() =>
+            {
+                var ffprobe = Discover(savedProbe, toolsDirectory, "ffprobe.exe");
+                return LibraryIntegration.ReadCatalogAsync(directory, ffprobe);
+            }));
             var list = new ListBox { ItemsSource = videos, SelectionMode = SelectionMode.Extended, Margin = new Thickness(12) };
             var button = new Button { Content = "Добавить выбранные", Margin = new Thickness(12) }; var panel = new DockPanel(); DockPanel.SetDock(button, Dock.Bottom); panel.Children.Add(button); panel.Children.Add(list);
             var dialog = new Window { Title = "Серии AnimeLib", Owner = this, Icon = Icon, Width = 850, Height = 550, Content = panel, WindowStartupLocation = WindowStartupLocation.CenterOwner };
             List<LibraryVideo> chosen = []; button.Click += (_, _) => { chosen = list.SelectedItems.Cast<LibraryVideo>().ToList(); if (chosen.Count > 0) dialog.DialogResult = true; };
             if (dialog.ShowDialog() != true) return;
-            SettingsPanel.IsEnabled = false;
-            try
+            await WhileLoadingAsync(async () =>
             {
-                var requests = new List<ProcessingRequest>();
-                foreach (var video in chosen)
+                var template = Request(chosen[0].SourcePath, chosen[0]);
+                var requests = await Task.Run(() => chosen.Select(video =>
                 {
-                    if (File.Exists(video.BackupPath)) throw new IOException("Серия уже заменена или требует восстановления: " + video.Title);
-                    var hash = await Task.Run(() => LibraryIntegration.Hash(video.SourcePath)); requests.Add(Request(video.SourcePath, video with { OriginalHash = hash }));
-                }
-                foreach (var r in requests) Jobs.Add(new() { Request = r }); Save();
-            }
-            finally { SettingsPanel.IsEnabled = true; }
+                    if (video.ExistingBackupPath != null)
+                        throw new IOException("Серия уже заменена или требует восстановления: " + video.Title);
+                    var hash = LibraryIntegration.Hash(video.SourcePath);
+                    return template with { Input = video.SourcePath, Library = video with { OriginalHash = hash } };
+                }).ToArray());
+                Enqueue(requests);
+                return true;
+            });
         }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Библиотека AnimeLib"); }
-        finally { trigger.IsEnabled = true; }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Библиотека AnimeLib"); }
+    }
+
+    /// <summary>Блокирует окно до окончания загрузки файлов.</summary>
+    private async Task<T> WhileLoadingAsync<T>(Func<Task<T>> load)
+    {
+        WorkspacePanel.IsEnabled = false;
+        LoadingOverlay.Visibility = Visibility.Visible;
+        try
+        {
+            await Dispatcher.Yield(DispatcherPriority.Background);
+            return await load();
+        }
+        finally
+        {
+            LoadingOverlay.Visibility = Visibility.Collapsed;
+            WorkspacePanel.IsEnabled = true;
+        }
+    }
+
+    /// <summary>Добавляет и сохраняет новую группу заданий.</summary>
+    private void Enqueue(IEnumerable<ProcessingRequest> requests)
+    {
+        var added = requests.Select(request => new QueueJob { Request = request }).ToArray();
+        foreach (var job in added) Jobs.Add(job);
+        try { Save(); }
+        catch
+        {
+            foreach (var job in added) Jobs.Remove(job);
+            throw;
+        }
     }
     /// <summary>Запускает очередь и обновляет окно.</summary>
     private async void Run(object sender, RoutedEventArgs e)
@@ -154,7 +211,6 @@ public partial class MainWindow : Window
             await queue.RunAsync(Jobs, Save, job =>
             {
                 started.Add(job);
-                JobsGrid.SelectedItem = job;
                 LogBox.Clear();
                 StatusText.Text = job.Name;
             }, Log, (job, value) => Dispatcher.InvokeAsync(() =>
@@ -164,7 +220,11 @@ public partial class MainWindow : Window
             finished = !cancellation.IsCancellationRequested;
             StatusText.Text = finished ? "Очередь завершена" : "Очередь остановлена. Ожидающие задания сохранены.";
         }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Очередь остановлена"); }
+        catch (Exception ex)
+        {
+            StatusText.Text = "Очередь остановлена";
+            MessageBox.Show(this, ex.Message, "Очередь остановлена");
+        }
         finally
         {
             timer.Stop();
@@ -187,43 +247,83 @@ public partial class MainWindow : Window
         QueueMetricsText.Text = $"Выполнено: {metrics.Percent:0.##} %   ·   Прошло: {QueueRunProgress.FormatDuration(elapsed)}   ·   Осталось: {remaining}";
     }
 
-    /// <summary>Форматирует длительность без сброса часов после суток.</summary>
-    private static string FormatDuration(TimeSpan duration) =>
-        $"{(long)duration.TotalHours:00}:{duration.Minutes:00}:{duration.Seconds:00}";
-    /// <summary>Возвращает прерванное задание в очередь.</summary>
-    private void Retry(object sender, RoutedEventArgs e) { if (JobsGrid.SelectedItem is QueueJob job && job.Status is "Ошибка" or "Отменено" or "Прервано") { job.Status = "Ожидает"; job.Progress = 0; TrySave(); } }
-    /// <summary>Убирает выбранное задание из списка.</summary>
-    private void Remove(object sender, RoutedEventArgs e)
+    /// <summary>Возвращает выбранные незавершённые задания в очередь.</summary>
+    private void Retry(object sender, RoutedEventArgs e)
     {
-        if (JobsGrid.SelectedItem is not QueueJob job || job.Status == "Обработка") return;
-        try { CancelledJobCleanup.DeleteArtifacts(job); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        var selected = JobsGrid.SelectedItems.Cast<QueueJob>()
+            .Where(job => job.Status is "Ошибка" or "Отменено" or "Прервано")
+            .Select(job => (Job: job, job.Status, job.Progress)).ToArray();
+        if (selected.Length == 0) return;
+
+        foreach (var item in selected)
         {
-            MessageBox.Show("Не удалось удалить файлы отменённой задачи: " + ex.Message);
-            return;
+            item.Job.Status = "Ожидает";
+            item.Job.Progress = 0;
         }
 
-        var index = Jobs.IndexOf(job);
-        Jobs.RemoveAt(index);
         try { Save(); }
         catch (Exception ex)
         {
-            Jobs.Insert(index, job);
-            JobsGrid.SelectedItem = job;
-            MessageBox.Show("Не удалось убрать задание: " + ex.Message);
-            return;
+            foreach (var item in selected)
+            {
+                item.Job.Status = item.Status;
+                item.Job.Progress = item.Progress;
+            }
+            MessageBox.Show(this, "Не удалось повторить задания: " + ex.Message);
+        }
+    }
+    /// <summary>Убирает выбранные задания и очищает файлы отменённых попыток.</summary>
+    private void Remove(object sender, RoutedEventArgs e)
+    {
+        var selected = JobsGrid.SelectedItems.Cast<QueueJob>()
+            .Where(job => job.Status != "Обработка")
+            .Select(job => (Job: job, Index: Jobs.IndexOf(job)))
+            .OrderByDescending(item => item.Index).ToArray();
+        var removed = new List<(QueueJob Job, int Index)>();
+        var errors = new List<string>();
+        foreach (var item in selected)
+        {
+            try { CancelledJobCleanup.DeleteArtifacts(item.Job); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                errors.Add($"{item.Job.Name}: {ex.Message}");
+                continue;
+            }
+
+            Jobs.RemoveAt(item.Index);
+            removed.Add(item);
         }
 
-        if (job.Request.Library is { } video && File.Exists(video.BackupPath))
-            Log("Задание убрано из очереди. Временный оригинал сохранён: " + video.BackupPath);
+        if (removed.Count > 0)
+        {
+            try { Save(); }
+            catch (Exception ex)
+            {
+                foreach (var item in removed.AsEnumerable().Reverse())
+                {
+                    Jobs.Insert(item.Index, item.Job);
+                    JobsGrid.SelectedItems.Add(item.Job);
+                }
+                errors.Add(ex.Message);
+                removed.Clear();
+            }
+        }
+
+        foreach (var item in removed)
+            if (item.Job.Request.Library?.ExistingBackupPath is { } backup)
+                Log("Задание убрано из очереди. Временный оригинал сохранён: " + backup);
+
+        if (errors.Count > 0)
+            MessageBox.Show(this, string.Join(Environment.NewLine, errors), "Не удалось убрать некоторые задания");
     }
-    /// <summary>Сохраняет изменения и показывает ошибку.</summary>
-    private void TrySave() { try { Save(); } catch (Exception ex) { MessageBox.Show(ex.Message); } }
     /// <summary>Показывает журнал выбранного задания.</summary>
     private void JobSelected(object sender, SelectionChangedEventArgs e)
     {
-        if (!ready || cancellation != null || JobsGrid.SelectedItem is not QueueJob job) return;
-        StatusText.Text = job.Profile + " · " + job.Range; LogBox.Text = job.Error; var file = Path.Combine(job.ResultPath, "processing.log");
+        if (!ready || cancellation != null || JobsGrid.SelectedItems.Count != 1 ||
+            JobsGrid.SelectedItem is not QueueJob job) return;
+        LogBox.Text = job.Error;
+        if (string.IsNullOrEmpty(job.ResultPath)) return;
+        var file = Path.Combine(job.ResultPath, "processing.log");
         if (File.Exists(file)) try { var text = File.ReadAllText(file); LogBox.Text += "\n" + text[^Math.Min(text.Length, 50_000)..]; } catch (IOException) { }
     }
     /// <summary>Выбирает папку результатов.</summary>
@@ -244,6 +344,7 @@ public partial class MainWindow : Window
     private void OnClosing(object? s, CancelEventArgs e)
     {
         if (!ready) return;
+        if (LoadingOverlay.Visibility == Visibility.Visible) { e.Cancel = true; return; }
         if (cancellation != null) { e.Cancel = true; closeAfterStop = true; Cancel(this, new()); StatusText.Text = "Останавливаем процесс и сохраняем очередь…"; return; }
         try { Save(); } catch (Exception ex) { e.Cancel = true; closeAfterStop = false; MessageBox.Show("Не удалось сохранить очередь: " + ex.Message); }
     }

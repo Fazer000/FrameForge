@@ -41,5 +41,7 @@ if (Test-Path -LiteralPath $publish) {
 dotnet publish $project -c Release -r win-x64 --self-contained true -p:Version=$Version -o $publish
 if ($LASTEXITCODE -ne 0) { throw "Ошибка публикации .NET: $LASTEXITCODE" }
 
+& (Join-Path $PSScriptRoot 'Copy-BundledTools.ps1') -Destination $publish
+
 & $Compiler "/DAppVersion=$Version" (Join-Path $PSScriptRoot 'FrameForge.iss')
 if ($LASTEXITCODE -ne 0) { throw "Ошибка Inno Setup: $LASTEXITCODE" }

@@ -72,6 +72,7 @@ public sealed class ProcessingTests
     {
         var profiles = ProcessingProfile.All;
         var planar = Video2XProcessor.BuildArguments(profiles[0], 2, "in file.mkv", "out.mkv", true);
+        Assert.Contains("--no-copy-streams", planar);
         Assert.DoesNotContain("-n", planar);
         Assert.Contains("in file.mkv", planar);
         Assert.Contains("ffv1", planar);
@@ -97,5 +98,47 @@ public sealed class ProcessingTests
             """);
         Assert.Equal(new VideoDetails(1280, 720, 42.5, "24/1", "h264"), data);
         Assert.Throws<InvalidOperationException>(() => VideoProbe.Parse("""{"streams":[{"codec_type":"audio"}]}"""));
+    }
+
+    /// <summary>Отличает служебную дорожку глав от обычных потоков данных.</summary>
+    [Fact]
+    public void FindsChapterDataInMp4()
+    {
+        const string json = """
+            {"streams":[
+                {"index":0,"codec_type":"video"},
+                {"index":1,"codec_type":"data","codec_name":"bin_data","codec_tag_string":"tmcd"},
+                {"index":2,"codec_type":"data","codec_name":"bin_data","codec_tag_string":"text"}
+            ],"chapters":[{"id":0}],"format":{"format_name":"mov,mp4"}}
+            """;
+        Assert.Equal(2, VideoProbe.FindChapterStreamCandidate(json));
+        Assert.Null(VideoProbe.FindChapterStreamCandidate(json.Replace("""[{"id":0}]""", "[]")));
+        Assert.Equal(2, VideoProbe.ParsePreservedStreams(json).Length);
+        Assert.Single(VideoProbe.ParsePreservedStreams(json, 2));
+    }
+
+    /// <summary>Сравнивает дорожки с учётом оформления и вложений.</summary>
+    [Fact]
+    public void ParsesPreservedStreamInventory()
+    {
+        var tracks = VideoProbe.ParsePreservedStreams("""
+            {"streams":[
+              {"codec_type":"audio","codec_name":"aac","extradata_hash":"ignored"},
+              {"codec_type":"video","codec_name":"h264"},
+              {"codec_type":"subtitle","codec_name":"ass","extradata_hash":"styles"},
+              {"codec_type":"subtitle","codec_name":"webvtt","extradata_hash":"regions"},
+              {"codec_type":"attachment","extradata_hash":"font"},
+              {"codec_type":"video","codec_name":"png"}
+            ]}
+            """);
+
+        Assert.Equal(new PreservedStream[]
+        {
+            new("audio", "aac"),
+            new("subtitle", "ass", "styles"),
+            new("subtitle", "webvtt", "regions"),
+            new("attachment", "", "font"),
+            new("video", "png")
+        }, tracks);
     }
 }

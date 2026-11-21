@@ -111,19 +111,24 @@ public sealed class QueueTests : IDisposable
 
 
     /// <summary>Удаляет файлы отменённой попытки после повторной загрузки очереди.</summary>
-    [Fact]
-    public async Task RemovesCancelledArtifacts()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RemovesCancelledArtifacts(bool newLayout)
     {
         const string attempt = "20261121-120000-a841a751";
         var series = new LibraryVideo(directory, "episode.bin", "Серия", "hash");
         var job = NewJob(series.SourcePath, series);
         job.Request = job.Request with { OutputRoot = directory };
-        var resultPath = Directory.CreateDirectory(Path.Combine(directory, attempt)).FullName;
-        var pending = series.SourcePath + $".frameforge-pending-{attempt}.mp4";
+        var workingRoot = newLayout ? series.WorkRoot : directory;
+        var resultPath = Directory.CreateDirectory(Path.Combine(workingRoot, attempt)).FullName;
+        var pending = newLayout ? Path.Combine(resultPath, "publish.mp4") :
+            series.SourcePath + $".frameforge-pending-{attempt}.mp4";
+        var backup = newLayout ? series.BackupPath : series.SourcePath + ".frameforge-original";
         var artifacts = new[] { Path.Combine(resultPath, "enhanced.partial.mkv"), Path.Combine(resultPath, "report.json"), pending };
         foreach (var file in artifacts) File.WriteAllText(file, "temporary");
         File.WriteAllText(series.SourcePath, "source");
-        File.WriteAllText(series.BackupPath, "backup");
+        File.WriteAllText(backup, "backup");
         var otherResult = Path.Combine(directory, "enhanced.mkv");
         File.WriteAllText(otherResult, "other result");
 
@@ -143,7 +148,7 @@ public sealed class QueueTests : IDisposable
         Assert.False(Directory.Exists(resultPath));
         Assert.All(artifacts, file => Assert.False(File.Exists(file)));
         Assert.Equal("source", File.ReadAllText(series.SourcePath));
-        Assert.Equal("backup", File.ReadAllText(series.BackupPath));
+        Assert.Equal("backup", File.ReadAllText(backup));
         Assert.Equal("other result", File.ReadAllText(otherResult));
     }
 

@@ -37,6 +37,13 @@ public sealed class ProcessingQueue(
                     ? "С предупреждением" : "Готово";
                 job.Progress = 100;
             }
+            catch (LibraryPublicationSkippedException ex)
+            {
+                job.Status = "С предупреждением";
+                job.Progress = 100;
+                job.Error = ex.Message;
+                log(ex.Message);
+            }
             catch (OperationCanceledException)
             {
                 if (job.ResultPath.Length > 0)

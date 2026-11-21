@@ -1,0 +1,12 @@
+Video2X 6.4.0 (CLI, DLLs and bundled models)
+Release and source code: https://github.com/k4yt3x/video2x/releases/tag/6.4.0
+Build recipes: https://github.com/k4yt3x/video2x/tree/6.4.0/.github/workflows
+License: tools/video2x/LICENSE.txt
+
+FFmpeg 9.0.2 essentials build (ffmpeg and ffprobe)
+Windows build: https://www.gyan.dev/ffmpeg/builds/
+Source revision: https://github.com/FFmpeg/FFmpeg/commit/946fcce07b
+See tools/ffmpeg/LICENSE and tools/ffmpeg/README.txt for upstream notices and build information.
+
+Microsoft Visual C++ x64 and OpenMP runtime libraries
+Redistribution: https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files

@@ -24,7 +24,7 @@ public sealed class Video2XProcessor : IVideoProcessor
         string[] noiseArgs = profile.Noise == -1 ? [] : ["-n", profile.Noise.ToString(CultureInfo.InvariantCulture)];
         string[] common = ["-i", input, "-o", output, "-p", profile.Processor,
             $"--{profile.Processor}-model", profile.Model, "-s", scale.ToString(),
-            ..noiseArgs, "-d", "0", "-c", lossless ? "ffv1" : "libx264", "--pix-fmt", "yuv420p"];
+            ..noiseArgs, "-d", "0", "-c", lossless ? "ffv1" : "libx264", "--pix-fmt", "yuv420p", "--no-copy-streams"];
         return lossless ? common : [.. common, "-e", $"crf={crf.ToString(CultureInfo.InvariantCulture)}", "-e", "preset=medium"];
     }
 
@@ -49,18 +49,20 @@ public sealed class Video2XProcessor : IVideoProcessor
         if (!r.FullVideo && (!double.IsFinite(r.Start) || !double.IsFinite(r.Duration) || r.Start < 0 || r.Duration <= 0 || r.Duration > 300))
             throw new ArgumentException("Укажите начало ≥ 0 и длительность от 0 до 300 секунд.");
         var source = await VideoProbe.ReadAsync(r.FFprobe, r.Input, token);
+        var (sourceStreams, chapterStream) = await VideoProbe.ReadTrackInventoryAsync(r.FFprobe, r.Input, token);
+        var externalSubtitles = LibraryIntegration.ReadExternalSubtitles(r.Input);
         var expectedDuration = r.FullVideo ? source.Duration : r.Duration;
         if (!double.IsFinite(expectedDuration) || expectedDuration <= 0) throw new ArgumentException("Не удалось определить длительность видео.");
         var plan = ResolutionPlan.Create(source.Width, source.Height, r.TargetWidth, r.TargetHeight, r.Profile);
         if (!r.FullVideo && source.Duration > 0 && r.Start + r.Duration > source.Duration + 0.1)
             throw new ArgumentException("Фрагмент выходит за длительность видео.");
-        var directory = Path.Combine(Path.GetFullPath(r.OutputRoot),
+        var directory = Path.Combine(Path.GetFullPath(r.Library?.WorkRoot ?? r.OutputRoot),
             $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}");
         Directory.CreateDirectory(directory);
         resultDirectoryCreated?.Invoke(directory);
         var clip = r.FullVideo ? r.Input : Path.Combine(directory, "reference.mkv");
         var partial = Path.Combine(directory, "enhanced.partial.mkv");
-        var intermediate = plan.NeedsResize ? Path.Combine(directory, "model-output.mkv") : partial;
+        var intermediate = Path.Combine(directory, "model-output.mkv");
         var output = Path.Combine(directory, "enhanced.mkv");
         var timer = Stopwatch.StartNew();
         var report = Path.Combine(directory, "report.json");
@@ -75,9 +77,8 @@ public sealed class Video2XProcessor : IVideoProcessor
                 log("Подготовка эталонного фрагмента без потерь (FFV1)…");
                 await ProcessRunner.RunAsync(r.FFmpeg,
                     ["-nostdin", "-n", "-v", "warning", "-i", r.Input, "-ss", r.Start.ToString(CultureInfo.InvariantCulture),
-                 "-t", r.Duration.ToString(CultureInfo.InvariantCulture), "-map", "0:v:0", "-map", "0:a?",
-                 // PCM принимает короткие аудиоблоки после обрезки, которые FLAC отклоняет.
-                 "-c:v", "ffv1", "-level", "3", "-c:a", "pcm_f32le", clip], log, token);
+                 "-t", r.Duration.ToString(CultureInfo.InvariantCulture), "-map", "0:v:0",
+                 "-c:v", "ffv1", "-level", "3", clip], log, token);
             }
             else log("Обработка полного видео. Исходный файл читается напрямую.");
             log($"Обработка: {r.Profile.Name}. {source.Width}×{source.Height} → модель {plan.ModelScale}× → {plan.Width}×{plan.Height}. GPU 0.\nКаталог: {directory}");
@@ -99,14 +100,36 @@ public sealed class Video2XProcessor : IVideoProcessor
                 log("ПРЕДУПРЕЖДЕНИЕ: " + warning);
             }
             if (plan.NeedsResize)
-            {
                 log($"Приведение к {plan.Width}×{plan.Height}, Lanczos. Промежуточный файл без потерь.");
-                await ProcessRunner.RunAsync(r.FFmpeg,
-                    ["-nostdin", "-n", "-v", "warning", "-xerror", "-i", intermediate, "-map", "0:v:0", "-map", "0:a?",
-                     "-map", "0:s?", "-map", "0:t?", "-c:s", "copy", "-c:t", "copy",
-                     "-vf", $"scale={plan.Width}:{plan.Height}:flags=lanczos,setsar=1", "-c:v", "libx264", "-crf", r.EncodingCrf.ToString(CultureInfo.InvariantCulture),
-                     "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy", partial], log, token);
-            }
+
+            log("Сборка MKV с исходными дорожками без перекодирования.");
+            string[] seek = r.FullVideo ? [] : ["-ss", r.Start.ToString(CultureInfo.InvariantCulture)];
+            var clipLength = r.Duration.ToString(CultureInfo.InvariantCulture);
+            string[] resize = plan.NeedsResize ?
+                ["-filter:v:0", $"scale={plan.Width}:{plan.Height}:flags=lanczos,setsar=1",
+                 "-c:v:0", "libx264", "-crf:v:0", r.EncodingCrf.ToString(CultureInfo.InvariantCulture),
+                 "-preset:v:0", "medium", "-pix_fmt:v:0", "yuv420p"] : [];
+            string[] chapterMapping = chapterStream is int chapterIndex ? ["-map", $"-1:{chapterIndex}"] : [];
+            var subtitleInputs = externalSubtitles.SelectMany(path => seek.Concat(["-i", path])).ToArray();
+            var subtitleMapping = externalSubtitles.SelectMany((_, index) => new[] { "-map", $"{index + 2}:s:0" }).ToArray();
+            var expectedStreams = new List<PreservedStream>(sourceStreams);
+            foreach (var subtitle in externalSubtitles)
+                expectedStreams.AddRange(await VideoProbe.ReadPreservedStreamsAsync(r.FFprobe, subtitle, token));
+
+            string[] clipTiming = r.FullVideo ? [] :
+                ["-t", clipLength, "-copypriorss", "0", "-avoid_negative_ts", "disabled"];
+            if (!r.FullVideo && expectedStreams.Any(stream => stream.Type == "subtitle"))
+                clipTiming = [..clipTiming, "-bsf:s", $@"setts=duration=min(DURATION\,max(0\,{clipLength}/TB-PTS))"];
+
+            await ProcessRunner.RunAsync(r.FFmpeg,
+                ["-nostdin", "-n", "-v", "warning", "-xerror", "-i", intermediate, ..seek, "-i", r.Input, ..subtitleInputs,
+                 "-map", "0:v:0", "-map", "1", "-map", "-1:v:0", ..chapterMapping, ..subtitleMapping, "-map_metadata", "1",
+                 "-map_chapters", r.FullVideo ? "1" : "-1", "-c", "copy", ..resize, ..clipTiming, partial], log, token);
+
+            var preserved = await VideoProbe.ReadPreservedStreamsAsync(r.FFprobe, partial, token);
+            if (!expectedStreams.GroupBy(stream => stream.Type).OrderBy(group => group.Key).SelectMany(group => group)
+                .SequenceEqual(preserved.GroupBy(stream => stream.Type).OrderBy(group => group.Key).SelectMany(group => group)))
+                throw new InvalidDataException("Результат не сохранил все исходные дорожки или их оформление.");
             progress(95);
             log("Проверка: полное декодирование видео и аудио…");
             await ProcessRunner.RunAsync(r.FFmpeg,
@@ -114,7 +137,9 @@ public sealed class Video2XProcessor : IVideoProcessor
             var result = await VideoProbe.ReadAsync(r.FFprobe, partial, token);
             if (result.Width != plan.Width || result.Height != plan.Height ||
                 result.Duration <= 0 || Math.Abs(result.Duration - expectedDuration) > 1 || result.FrameRate != source.FrameRate)
-                throw new InvalidOperationException("Результат не прошёл проверку размера или длительности.");
+                throw new InvalidOperationException(
+                    $"Результат не прошёл проверку: получено {result.Width}×{result.Height}, {result.Duration:0.###} с, {result.FrameRate} кадр/с. " +
+                    $"Ожидалось {plan.Width}×{plan.Height}, {expectedDuration:0.###} с, {source.FrameRate} кадр/с.");
             token.ThrowIfCancellationRequested();
             File.Move(partial, output, overwrite: false);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new
@@ -131,7 +156,7 @@ public sealed class Video2XProcessor : IVideoProcessor
             }, new JsonSerializerOptions { WriteIndented = true }));
             if (!r.KeepTemporaryFiles)
             {
-                foreach (var temporary in new[] { r.FullVideo ? null : clip, plan.NeedsResize ? intermediate : null })
+                foreach (var temporary in new[] { r.FullVideo ? null : clip, intermediate })
                     if (temporary != null) try { File.Delete(temporary); } catch (IOException ex) { log("Не удалось удалить временный файл: " + ex.Message); }
             }
             progress(100);
