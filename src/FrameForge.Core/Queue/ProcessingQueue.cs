@@ -46,8 +46,6 @@ public sealed class ProcessingQueue(
             }
             catch (OperationCanceledException)
             {
-                if (job.ResultPath.Length > 0)
-                    job.CancelledResultPaths.Add(job.ResultPath);
                 job.Status = "Отменено";
                 job.Error = "Отменено пользователем";
             }

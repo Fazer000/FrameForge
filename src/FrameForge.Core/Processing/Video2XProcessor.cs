@@ -66,7 +66,7 @@ public sealed class Video2XProcessor : IVideoProcessor
         var output = Path.Combine(directory, "enhanced.mkv");
         var timer = Stopwatch.StartNew();
         var report = Path.Combine(directory, "report.json");
-        string? warning = null;
+        string? video2XExitCode = null;
         using var journal = new StreamWriter(Path.Combine(directory, "processing.log"), append: false, Encoding.UTF8) { AutoFlush = true };
         var notify = log;
         log = line => { lock (journal) journal.WriteLine($"{DateTimeOffset.Now:O} {line}"); notify(line); };
@@ -96,8 +96,8 @@ public sealed class Video2XProcessor : IVideoProcessor
             catch (ExternalProcessException ex) when (ex.ExitCode == unchecked((int)0xC0000005) &&
                 ex.Message.Contains("Video processed successfully", StringComparison.Ordinal) && File.Exists(intermediate))
             {
-                warning = "Video2X завершился с 0xC0000005 после сообщения об успехе. Результат требует проверки; это сбой обработчика.";
-                log("ПРЕДУПРЕЖДЕНИЕ: " + warning);
+                video2XExitCode = $"0x{unchecked((uint)ex.ExitCode):X8}";
+                log($"Диагностика Video2X: код {video2XExitCode} после записи видео. Проверяем итоговый файл.");
             }
             if (plan.NeedsResize)
                 log($"Приведение к {plan.Width}×{plan.Height}, Lanczos. Промежуточный файл без потерь.");
@@ -144,8 +144,8 @@ public sealed class Video2XProcessor : IVideoProcessor
             File.Move(partial, output, overwrite: false);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new
             {
-                Status = warning == null ? "Completed" : "CompletedWithWarning",
-                Warning = warning,
+                Status = "Completed",
+                Video2XExitCode = video2XExitCode,
                 Request = r,
                 Plan = plan,
                 Source = source,
@@ -159,6 +159,9 @@ public sealed class Video2XProcessor : IVideoProcessor
                 foreach (var temporary in new[] { r.FullVideo ? null : clip, intermediate })
                     if (temporary != null) try { File.Delete(temporary); } catch (IOException ex) { log("Не удалось удалить временный файл: " + ex.Message); }
             }
+            if (video2XExitCode != null)
+                log("Итоговый файл прошёл проверку и сохранён.");
+
             progress(100);
             return directory;
         }
@@ -167,6 +170,7 @@ public sealed class Video2XProcessor : IVideoProcessor
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new
             {
                 Status = token.IsCancellationRequested ? "Cancelled" : "Failed",
+                Video2XExitCode = video2XExitCode,
                 Request = r,
                 Error = ex.Message,
                 ElapsedSeconds = timer.Elapsed.TotalSeconds

@@ -110,66 +110,22 @@ public sealed class QueueTests : IDisposable
         Assert.Equal(expected, Video2XProcessor.FormatProgressLog(line));
 
 
-    /// <summary>Удаляет файлы отменённой попытки после повторной загрузки очереди.</summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task RemovesCancelledArtifacts(bool newLayout)
+    /// <summary>Сохраняет путь к рабочей папке после отмены.</summary>
+    [Fact]
+    public async Task PersistsCancelledResultPath()
     {
-        const string attempt = "20261121-120000-a841a751";
-        var series = new LibraryVideo(directory, "episode.bin", "Серия", "hash");
-        var job = NewJob(series.SourcePath, series);
-        job.Request = job.Request with { OutputRoot = directory };
-        var workingRoot = newLayout ? series.WorkRoot : directory;
-        var resultPath = Directory.CreateDirectory(Path.Combine(workingRoot, attempt)).FullName;
-        var pending = newLayout ? Path.Combine(resultPath, "publish.mp4") :
-            series.SourcePath + $".frameforge-pending-{attempt}.mp4";
-        var backup = newLayout ? series.BackupPath : series.SourcePath + ".frameforge-original";
-        var artifacts = new[] { Path.Combine(resultPath, "enhanced.partial.mkv"), Path.Combine(resultPath, "report.json"), pending };
-        foreach (var file in artifacts) File.WriteAllText(file, "temporary");
-        File.WriteAllText(series.SourcePath, "source");
-        File.WriteAllText(backup, "backup");
-        var otherResult = Path.Combine(directory, "enhanced.mkv");
-        File.WriteAllText(otherResult, "other result");
-
+        var job = NewJob("input.mkv");
+        var resultPath = Path.Combine(directory, "attempt");
         var store = new WorkspaceStore(Path.Combine(directory, "state"));
         var state = new WorkspaceState { Jobs = [job] };
         var queue = new ProcessingQueue(new DirectoryReportingProcessor(resultPath),
             (_, _, _, _) => throw new InvalidOperationException());
+
         await queue.RunAsync(state.Jobs, () => store.Save(state), _ => { }, _ => { }, (_, _) => { }, CancellationToken.None);
+
         var saved = Assert.Single(store.Load().Jobs);
         Assert.Equal("Отменено", saved.Status);
         Assert.Equal(resultPath, saved.ResultPath);
-        Assert.Equal(resultPath, Assert.Single(saved.CancelledResultPaths));
-
-        CancelledJobCleanup.DeleteArtifacts(saved);
-        CancelledJobCleanup.DeleteArtifacts(saved);
-
-        Assert.False(Directory.Exists(resultPath));
-        Assert.All(artifacts, file => Assert.False(File.Exists(file)));
-        Assert.Equal("source", File.ReadAllText(series.SourcePath));
-        Assert.Equal("backup", File.ReadAllText(backup));
-        Assert.Equal("other result", File.ReadAllText(otherResult));
-    }
-
-    /// <summary>Сохраняет результат успешного повтора при очистке отменённой попытки.</summary>
-    [Fact]
-    public void KeepsSuccessfulRetryResult()
-    {
-        var past = Directory.CreateDirectory(Path.Combine(directory, "20261121-120000-a841a751")).FullName;
-        var current = Directory.CreateDirectory(Path.Combine(directory, "20261121-120001-a841a752")).FullName;
-        var currentVideo = Path.Combine(current, "enhanced.mkv");
-        File.WriteAllText(currentVideo, "final");
-        var job = NewJob("input.mkv");
-        job.Request = job.Request with { OutputRoot = directory };
-        job.CancelledResultPaths.Add(past);
-        job.ResultPath = current;
-        job.Status = "Готово";
-
-        CancelledJobCleanup.DeleteArtifacts(job);
-
-        Assert.False(Directory.Exists(past));
-        Assert.Equal("final", File.ReadAllText(currentVideo));
     }
 
     /// <summary>Проверяет восстановление очереди и запасной файл состояния.</summary>

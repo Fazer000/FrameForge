@@ -151,10 +151,6 @@ public static class LibraryIntegration
         File.Move(temporary, video.MarkerPath, overwrite: true);
     }
 
-    /// <summary>Возвращает путь к временному MP4 попытки.</summary>
-    internal static string GetLegacyPendingPath(LibraryVideo video, string resultDirectory) =>
-        video.SourcePath + $".frameforge-pending-{Path.GetFileName(Path.TrimEndingDirectorySeparator(resultDirectory))}.mp4";
-
     /// <summary>Проверяет и публикует улучшенную серию.</summary>
     public static async Task PublishAsync(ProcessingRequest request, string resultDirectory, Action<string> log, CancellationToken token)
     {
@@ -197,10 +193,35 @@ public static class LibraryIntegration
             WriteMarker(video, marker);
             File.Replace(temporary, video.SourcePath, video.BackupPath);
         }
-        log("Проверка записанного файла серии перед удалением временного оригинала…");
-        if (Hash(video.SourcePath) != enhancedHash || Hash(video.BackupPath) != video.OriginalHash)
-            throw new IOException("Файлы после замены не прошли проверку SHA256. Временный оригинал сохранён: " + video.BackupPath);
-        WriteMarker(video, marker with { State = "Enhanced" });
+        string? installedHash = null;
+        try
+        {
+            log("Проверка записанного файла серии перед удалением временного оригинала…");
+            installedHash = Hash(video.SourcePath);
+            if (installedHash != enhancedHash || Hash(video.BackupPath) != video.OriginalHash)
+                throw new IOException("Файлы после замены не прошли проверку SHA256.");
+            WriteMarker(video, marker with { State = "Enhanced" });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            try
+            {
+                ReplaceWithOriginal(video, video.BackupPath, video.OriginalHash, installedHash ?? enhancedHash, temporary);
+            }
+            catch (Exception restoreError) when (restoreError is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                throw new IOException($"Не удалось вернуть оригинал автоматически. Копия оригинала: {video.BackupPath}",
+                    new AggregateException(ex, restoreError));
+            }
+
+            try { WriteMarker(video, marker with { State = "Restored" }); }
+            catch (Exception markerError) when (markerError is IOException or UnauthorizedAccessException)
+            {
+                log("Оригинал восстановлен. Не удалось обновить метку замены: " + markerError.Message);
+            }
+
+            throw new IOException("Финальная проверка не прошла. Оригинал возвращён в библиотеку AnimeLib.", ex);
+        }
         try { File.Delete(video.BackupPath); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         { throw new IOException("Серия улучшена, но временный оригинал не удалось удалить: " + video.BackupPath, ex); }
@@ -220,11 +241,26 @@ public static class LibraryIntegration
         var backup = video.ExistingBackupPath ?? throw new FileNotFoundException("Не найдена копия оригинала.");
         var marker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(video.ReadableMarkerPath))
             ?? throw new InvalidDataException("Повреждена информация об улучшении.");
-        if (marker.Version != 1 || marker.SourceFileName != video.FileName || Hash(backup) != marker.OriginalHash)
-            throw new InvalidDataException("Резервная копия не прошла проверку SHA256.");
-        if (Hash(video.SourcePath) != marker.EnhancedHash) throw new IOException("Текущий файл серии изменён. Автоматическое восстановление отменено.");
-        using var exclusive = new FileStream(video.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Delete);
-        File.Replace(backup, video.SourcePath, null);
+        if (marker.Version != 1 || marker.SourceFileName != video.FileName)
+            throw new InvalidDataException("Метка улучшения не соответствует серии.");
+
+        ReplaceWithOriginal(video, backup, marker.OriginalHash, marker.EnhancedHash, null);
         WriteMarker(video, marker with { State = "Restored" });
+    }
+
+    /// <summary>Возвращает проверенный оригинал на место текущего файла серии.</summary>
+    private static void ReplaceWithOriginal(LibraryVideo video, string backup, string originalHash,
+        string currentHash, string? displacedFile)
+    {
+        if (Hash(backup) != originalHash)
+            throw new InvalidDataException("Резервная копия не прошла проверку SHA256.");
+
+        using var current = new FileStream(video.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Delete);
+        if (Convert.ToHexString(SHA256.HashData(current)) != currentHash)
+            throw new IOException("Текущий файл серии изменён. Восстановление остановлено.");
+
+        if (displacedFile != null && File.Exists(displacedFile))
+            throw new IOException("Место для сохранения заменяемого файла уже занято: " + displacedFile);
+        File.Replace(backup, video.SourcePath, displacedFile);
     }
 }

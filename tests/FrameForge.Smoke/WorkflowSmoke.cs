@@ -71,6 +71,18 @@ public static class WorkflowSmoke
             var (width, height) = profile.Noise == 1 ? (640, 360) : (480, 270);
             var request = new ProcessingRequest(richSource, directory, engine, ffmpeg, probe, profile, width, height, 0, 0, FullVideo: true, KeepTemporaryFiles: false, EncodingCrf: 22);
             var result = await processor.ProcessAsync(request, Console.WriteLine, _ => { }, CancellationToken.None);
+            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result, "report.json")));
+            var outcome = report.RootElement;
+            if (outcome.GetProperty("Status").GetString() != "Completed")
+                throw new Exception("A verified MKV must count as successful");
+            if (outcome.GetProperty("Video2XExitCode").GetString() is { } diagnostic)
+            {
+                var journal = await File.ReadAllTextAsync(Path.Combine(result, "processing.log"));
+                if (diagnostic != "0xC0000005" || !journal.Contains(diagnostic, StringComparison.Ordinal) ||
+                    !journal.Contains("Итоговый файл прошёл проверку и сохранён.", StringComparison.Ordinal))
+                    throw new Exception("Recovered Video2X exit must remain in the technical diagnostics");
+            }
+
             var enhanced = Path.Combine(result, "enhanced.mkv");
             var preserved = await VideoProbe.ReadPreservedStreamsAsync(probe, enhanced, CancellationToken.None);
             if (!originalTracks.SequenceEqual(preserved)) throw new Exception("Original tracks lost");
@@ -163,6 +175,26 @@ public static class WorkflowSmoke
         try { await LibraryIntegration.PublishAsync(publishRequest, firstResult!, _ => { }, CancellationToken.None); throw new Exception("Repeated replacement allowed"); }
         catch (InvalidOperationException) { }
         Console.WriteLine("PASS successful replacement: original deleted, Enhanced marker matches destination SHA256");
+        var rollbackVideo = new LibraryVideo(directory, "verification-failure.mp4", "Проверка отката", hash);
+        File.WriteAllBytes(rollbackVideo.SourcePath, originalBytes);
+        var rollbackDirectory = Directory.CreateDirectory(Path.Combine(video.WorkRoot, "rollback")).FullName;
+        File.Copy(recoveryResult, Path.Combine(rollbackDirectory, "enhanced.mkv"));
+        try
+        {
+            await LibraryIntegration.PublishAsync(publishRequest with { Library = rollbackVideo }, rollbackDirectory, line =>
+            {
+                if (line.StartsWith("Проверка записанного", StringComparison.Ordinal))
+                    File.AppendAllText(rollbackVideo.SourcePath, "damaged");
+            }, CancellationToken.None);
+            throw new Exception("Expected rollback after failed final verification");
+        }
+        catch (IOException ex) when (ex.Message.Contains("Оригинал возвращён", StringComparison.Ordinal)) { }
+        if (LibraryIntegration.Hash(rollbackVideo.SourcePath) != hash || File.Exists(rollbackVideo.BackupPath) ||
+            !File.Exists(Path.Combine(rollbackDirectory, "publish.mp4")))
+            throw new Exception("Rollback did not return the original and preserve the failed replacement");
+        var rollbackMarker = JsonSerializer.Deserialize<EnhancementMarker>(File.ReadAllText(rollbackVideo.MarkerPath));
+        if (rollbackMarker?.State != "Restored") throw new Exception("Rollback did not mark the original as restored");
+
         var failedVideo = new LibraryVideo(directory, "cleanup-failure.mkv", "Cleanup failure", hash);
         File.WriteAllBytes(failedVideo.SourcePath, originalBytes);
         FileStream? lockedBackup = null;

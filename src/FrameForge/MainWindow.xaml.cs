@@ -272,49 +272,28 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "Не удалось повторить задания: " + ex.Message);
         }
     }
-    /// <summary>Убирает выбранные задания и очищает файлы отменённых попыток.</summary>
+    /// <summary>Убирает выбранные задания из очереди.</summary>
     private void Remove(object sender, RoutedEventArgs e)
     {
         var selected = JobsGrid.SelectedItems.Cast<QueueJob>()
             .Where(job => job.Status != "Обработка")
             .Select(job => (Job: job, Index: Jobs.IndexOf(job)))
             .OrderByDescending(item => item.Index).ToArray();
-        var removed = new List<(QueueJob Job, int Index)>();
-        var errors = new List<string>();
+        if (selected.Length == 0) return;
+
         foreach (var item in selected)
-        {
-            try { CancelledJobCleanup.DeleteArtifacts(item.Job); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-            {
-                errors.Add($"{item.Job.Name}: {ex.Message}");
-                continue;
-            }
-
             Jobs.RemoveAt(item.Index);
-            removed.Add(item);
-        }
 
-        if (removed.Count > 0)
+        try { Save(); }
+        catch (Exception ex)
         {
-            try { Save(); }
-            catch (Exception ex)
+            foreach (var item in selected.Reverse())
             {
-                foreach (var item in removed.AsEnumerable().Reverse())
-                {
-                    Jobs.Insert(item.Index, item.Job);
-                    JobsGrid.SelectedItems.Add(item.Job);
-                }
-                errors.Add(ex.Message);
-                removed.Clear();
+                Jobs.Insert(item.Index, item.Job);
+                JobsGrid.SelectedItems.Add(item.Job);
             }
+            MessageBox.Show(this, ex.Message, "Не удалось убрать задания");
         }
-
-        foreach (var item in removed)
-            if (item.Job.Request.Library?.ExistingBackupPath is { } backup)
-                Log("Задание убрано из очереди. Временный оригинал сохранён: " + backup);
-
-        if (errors.Count > 0)
-            MessageBox.Show(this, string.Join(Environment.NewLine, errors), "Не удалось убрать некоторые задания");
     }
     /// <summary>Показывает журнал выбранного задания.</summary>
     private void JobSelected(object sender, SelectionChangedEventArgs e)
